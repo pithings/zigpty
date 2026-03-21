@@ -1,0 +1,29 @@
+{
+  "name": "zigpty",
+  "version": "0.0.2",
+  "repository": "pithings/zigpty",
+  "files": [
+    "dist",
+    "prebuilds"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.mjs"
+  },
+  "scripts": {
+    "build": "zig build --release && obuild",
+    "build:zig": "zig build --release",
+    "build:zig:debug": "zig build",
+    "fmt": "oxfmt . && zig fmt zig/",
+    "fmt:check": "oxfmt --check . && zig fmt --check zig/",
+    "test": "vitest run",
+    "release": "bun run build && changelogen --release --push --publish"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "changelogen": "^0.6.2",
+    "obuild": "^0.4.32",
+    "oxfmt": "^0.41.0",
+    "vitest": "^3.1.4"
+  }
+}

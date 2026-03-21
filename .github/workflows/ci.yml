@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Detect Zig version
+        id: zig-version
+        shell: bash
+        run: echo "version=$(sed -n 's/.*minimum_zig_version = "\([^"]*\)".*/\1/p' build.zig.zon)" >> "$GITHUB_OUTPUT"
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ steps.zig-version.outputs.version }}
+
+      - name: Install JS dependencies
+        run: bun install
+
+      - name: Build (Zig — native only)
+        if: runner.os == 'Windows'
+        run: zig build -Dtarget=x86_64-windows
+
+      - name: Build (Zig — all targets)
+        if: runner.os != 'Windows'
+        run: zig build
+
+      - name: Build (TypeScript)
+        run: bunx --bun obuild
+
+      - name: Test
+        run: bun vitest run
