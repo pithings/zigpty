@@ -43,4 +43,4 @@ jobs:
         run: bunx --bun obuild
 
       - name: Test
-        run: bun vitest run
+        run: bun test

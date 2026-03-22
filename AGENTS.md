@@ -97,7 +97,7 @@ zig build -Dtarget=x86_64-windows
 bun run build
 
 # Run tests
-bun vitest run
+bun test
 
 # Cross-platform smoke tests (Docker, Linux only)
 bash scripts/cross-platform.sh

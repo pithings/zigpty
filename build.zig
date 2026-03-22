@@ -25,6 +25,21 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    // --- Zig tests ---
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("zig/lib.zig"),
+        .target = b.resolveTargetQuery(target_query),
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    if (b.resolveTargetQuery(target_query).result.os.tag == .linux) {
+        test_mod.linkSystemLibrary("util", .{});
+    }
+    const lib_tests = b.addTest(.{ .root_module = test_mod });
+    const run_tests = b.addRunArtifact(lib_tests);
+    const test_step = b.step("test", "Run Zig unit tests");
+    test_step.dependOn(&run_tests.step);
+
     // --- NAPI shared library builds ---
     const clean = &b.addRemoveDirTree(.{ .cwd_relative = "prebuilds" }).step;
 

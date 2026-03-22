@@ -1,5 +1,5 @@
 import { platform } from "node:os";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { open, spawn } from "./index.ts";
 
 const isWindows = platform() === "win32";

@@ -223,7 +223,7 @@ Requires [Zig](https://ziglang.org/) 0.15.1+.
 zig build              # Build prebuilds (all targets)
 zig build --release    # Release build
 bun run build          # Build + bundle TypeScript
-bun vitest run         # Run tests
+bun test               # Run tests
 ```
 
 ## Credits
