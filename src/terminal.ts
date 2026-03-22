@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as tty from "node:tty";
 import { isWindows, native, type INativeUnix, type INativeWindows } from "./napi.ts";
+import { WriteQueue } from "./pty/_writeQueue.ts";
 
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
@@ -44,9 +45,7 @@ export class Terminal implements AsyncDisposable {
 
   // Unix internals
   private _readable?: tty.ReadStream;
-  private _writeQueue: Array<{ buffer: Buffer; offset: number }> = [];
-  private _writing = false;
-  private _writeImmediate: ReturnType<typeof setImmediate> | null = null;
+  private _wq?: WriteQueue;
 
   // Windows internals
   private _winHandle?: object;
@@ -118,11 +117,7 @@ export class Terminal implements AsyncDisposable {
     if (this._closed) return;
     this._closed = true;
 
-    if (this._writeImmediate) {
-      clearImmediate(this._writeImmediate);
-      this._writeImmediate = null;
-    }
-    this._writeQueue.length = 0;
+    this._wq?.close();
 
     if (isWindows) {
       this._winDeferred.length = 0;
@@ -138,8 +133,10 @@ export class Terminal implements AsyncDisposable {
           fs.closeSync(this.stdin);
         } catch {}
       }
+      this.stdin = -1;
     }
 
+    this._dataListeners.length = 0;
     this._onExit?.(this, 0, null);
   }
 
@@ -197,14 +194,11 @@ export class Terminal implements AsyncDisposable {
       this._emitData(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
     });
     this._readable.on("error", () => {});
+    this._wq = new WriteQueue(fd, () => this._onDrain?.(this));
   }
 
   private _writeUnix(data: string | Uint8Array): number {
-    if (this.stdin < 0) return 0;
-    const buf = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
-    this._writeQueue.push({ buffer: buf, offset: 0 });
-    this._processWriteQueue();
-    return buf.length;
+    return this._wq?.enqueue(data) ?? 0;
   }
 
   private _writeWindows(data: string | Uint8Array): number {
@@ -215,35 +209,5 @@ export class Terminal implements AsyncDisposable {
     if (this._winReady) doWrite();
     else this._winDeferred.push(doWrite);
     return len;
-  }
-
-  private _processWriteQueue(): void {
-    if (this._writing || this._writeQueue.length === 0 || this._closed) return;
-    this._writing = true;
-
-    const task = this._writeQueue[0]!;
-    fs.write(this.stdin, task.buffer, task.offset, (err, written) => {
-      this._writing = false;
-
-      if (err) {
-        if ("code" in err && err.code === "EAGAIN") {
-          this._writeImmediate = setImmediate(() => this._processWriteQueue());
-          return;
-        }
-        this._writeQueue.length = 0;
-        return;
-      }
-
-      task.offset += written;
-      if (task.offset >= task.buffer.length) {
-        this._writeQueue.shift();
-      }
-
-      if (this._writeQueue.length === 0) {
-        this._onDrain?.(this);
-      }
-
-      this._processWriteQueue();
-    });
   }
 }

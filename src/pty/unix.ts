@@ -7,6 +7,7 @@ import type { INativeUnix } from "../napi.ts";
 const native = _native as INativeUnix;
 import type { IPtyOptions } from "./types.ts";
 import { BasePty, DEFAULT_COLS, DEFAULT_ROWS, buildEnvPairs } from "./_base.ts";
+import { WriteQueue } from "./_writeQueue.ts";
 
 // Default flow control characters
 const DEFAULT_FLOW_PAUSE = "\x13"; // XOFF
@@ -21,9 +22,7 @@ export class UnixPty extends BasePty {
   private _encoding: BufferEncoding | null;
   private _flowControlPause: string;
   private _flowControlResume: string;
-  private _writeQueue: Array<{ buffer: Buffer; offset: number }> = [];
-  private _writing = false;
-  private _writeImmediate: ReturnType<typeof setImmediate> | null = null;
+  private _wq: WriteQueue;
 
   constructor(file: string, args: string[], options?: IPtyOptions) {
     const cols = options?.cols ?? DEFAULT_COLS;
@@ -52,6 +51,7 @@ export class UnixPty extends BasePty {
     this._encoding = encoding;
     this._flowControlPause = options?.flowControlPause ?? DEFAULT_FLOW_PAUSE;
     this._flowControlResume = options?.flowControlResume ?? DEFAULT_FLOW_RESUME;
+    this._wq = new WriteQueue(this._fd);
 
     // Attach terminal to fork's fd if provided
     if (this._terminal) {
@@ -84,9 +84,7 @@ export class UnixPty extends BasePty {
 
   write(data: string): void {
     if (this._closed) return;
-    const buf = Buffer.from(data, this._encoding || "utf8");
-    this._writeQueue.push({ buffer: buf, offset: 0 });
-    this._processWriteQueue();
+    this._wq.enqueue(data, this._encoding);
   }
 
   resize(cols: number, rows: number, pixelSize?: { width: number; height: number }): void {
@@ -120,11 +118,7 @@ export class UnixPty extends BasePty {
     if (this._closed) return;
     this._closed = true;
 
-    if (this._writeImmediate) {
-      clearImmediate(this._writeImmediate);
-      this._writeImmediate = null;
-    }
-    this._writeQueue.length = 0;
+    this._wq.close();
 
     try {
       this._readable.destroy();
@@ -138,31 +132,6 @@ export class UnixPty extends BasePty {
       process.kill(this.pid, 0);
       process.kill(this.pid, "SIGHUP");
     } catch {}
-  }
-
-  private _processWriteQueue(): void {
-    if (this._writing || this._writeQueue.length === 0 || this._closed) return;
-    this._writing = true;
-
-    const task = this._writeQueue[0]!;
-    fs.write(this._fd, task.buffer, task.offset, (err, written) => {
-      this._writing = false;
-
-      if (err) {
-        if ("code" in err && err.code === "EAGAIN") {
-          this._writeImmediate = setImmediate(() => this._processWriteQueue());
-          return;
-        }
-        this._writeQueue.length = 0;
-        return;
-      }
-
-      task.offset += written;
-      if (task.offset >= task.buffer.length) {
-        this._writeQueue.shift();
-      }
-      this._processWriteQueue();
-    });
   }
 }
 

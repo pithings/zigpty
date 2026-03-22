@@ -27,12 +27,15 @@ export class WindowsPty extends BasePty {
       // First data received — ConPTY is ready, flush deferred calls
       if (!this._ready) {
         this._ready = true;
+        if (this._closed) return;
         if (this._terminal) {
           this._terminal._markReady();
         }
-        for (const fn of this._deferredCalls) fn();
+        const deferred = [...this._deferredCalls];
         this._deferredCalls.length = 0;
+        for (const fn of deferred) fn();
       }
+      if (this._closed) return;
 
       // Emit to terminal callbacks
       if (this._terminal) {

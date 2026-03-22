@@ -77,6 +77,22 @@ export abstract class BasePty implements IPty {
     const pty = this;
     return new Promise((resolve, reject) => {
       let collected = "";
+      let cleaned = false;
+
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        clearTimeout(timer);
+        disposable?.dispose();
+        if (terminalListener) {
+          const listeners = terminal?._dataListeners;
+          if (listeners) {
+            const idx = listeners.indexOf(terminalListener);
+            if (idx >= 0) listeners.splice(idx, 1);
+          }
+        }
+      };
+
       const timer = setTimeout(() => {
         cleanup();
         reject(new Error(`waitFor("${pattern}") timed out after ${timeout}ms`));
@@ -86,19 +102,11 @@ export abstract class BasePty implements IPty {
       let terminalListener: ((data: string) => void) | undefined;
 
       const onChunk = (text: string) => {
+        if (cleaned) return;
         collected += text;
         if (collected.includes(pattern)) {
           cleanup();
           resolve(collected);
-        }
-      };
-
-      const cleanup = () => {
-        clearTimeout(timer);
-        disposable?.dispose();
-        if (terminalListener && terminal) {
-          const idx = terminal._dataListeners.indexOf(terminalListener);
-          if (idx >= 0) terminal._dataListeners.splice(idx, 1);
         }
       };
 
@@ -121,6 +129,8 @@ export abstract class BasePty implements IPty {
       listener(info);
     }
     this._resolveExited(info.exitCode);
+    this._dataListeners.length = 0;
+    this._exitListeners.length = 0;
   }
 
   abstract get process(): string;
