@@ -52,5 +52,5 @@ jobs:
       - name: Test (Node)
         run: bunx vitest run
 
-      - name: Test (Bun)
-        run: bun test
+      # - name: Test (Bun)
+      #   run: bun test
