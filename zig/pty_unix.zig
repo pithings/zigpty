@@ -123,8 +123,6 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         &tsfn,
     ));
 
-    _ = napi.napi_unref_threadsafe_function(env, tsfn);
-
     const ctx = alloc.create(ExitContext) catch {
         _ = napi.napi_release_threadsafe_function(tsfn, .abort);
         _ = napi.napi_throw_error(env, null, "failed to allocate exit context");

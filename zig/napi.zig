@@ -72,7 +72,6 @@ pub extern fn napi_get_named_property(env: napi_env, object: napi_value, name: [
 // --- Value creation ---
 
 pub extern fn napi_create_int32(env: napi_env, value: i32, result: *napi_value) napi_status;
-pub extern fn napi_create_uint32(env: napi_env, value: u32, result: *napi_value) napi_status;
 pub extern fn napi_create_int64(env: napi_env, value: i64, result: *napi_value) napi_status;
 pub extern fn napi_create_double(env: napi_env, value: f64, result: *napi_value) napi_status;
 pub extern fn napi_create_string_utf8(env: napi_env, str: [*]const u8, length: usize, result: *napi_value) napi_status;

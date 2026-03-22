@@ -18,7 +18,6 @@ pub const fork = if (!is_windows) unix_napi.fork else void;
 pub const open = if (!is_windows) unix_napi.open else void;
 pub const resize = if (!is_windows) unix_napi.resize else void;
 pub const getProcess = if (!is_windows) unix_napi.getProcess else void;
-
 // Windows re-exports
 pub const winSpawn = if (is_windows) win_napi.spawn else void;
 pub const winWrite = if (is_windows) win_napi.write else void;
