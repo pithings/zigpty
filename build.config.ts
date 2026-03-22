@@ -5,7 +5,7 @@ export default defineBuildConfig({
   entries: [
     {
       type: "bundle",
-      input: "./node/index.ts",
+      input: "./src/index.ts",
     },
   ],
   // hooks: {
