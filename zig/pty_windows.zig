@@ -14,7 +14,7 @@ pub const WORD = windows.WORD;
 pub const Fd = HANDLE;
 pub const Pid = DWORD;
 
-pub const ExitInfo = @import("../lib.zig").ExitInfo;
+pub const ExitInfo = @import("lib.zig").ExitInfo;
 
 pub const COORD = extern struct {
     x: i16,

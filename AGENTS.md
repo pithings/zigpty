@@ -6,7 +6,7 @@ Zig-based PTY library. Dual-use: standalone **Zig package** and **Node.js NAPI a
 
 - Smallest build (19KB ReleaseSmall vs node-pty's ~500KB+ with C++ runtime)
 - Pure Zig PTY library with no NAPI dependency (`lib.zig`)
-- Thin NAPI wrapper layer for Node.js (`pty.zig` + `pty_unix.zig` + `windows/napi.zig` + `root.zig`)
+- Thin NAPI wrapper layer for Node.js (`pty.zig` + `pty_unix.zig` + `win/napi.zig` + `root.zig`)
 - Raw NAPI — no third-party Zig NAPI bindings, no node-gyp
 - Cross-platform (Linux + macOS + Windows)
 - Statically linked via Zig
@@ -27,8 +27,8 @@ zigpty/
 │   ├── termios.zig         # Default terminal config (Linux + macOS)
 │   ├── pty_linux.zig       # Linux-specific: execvpe, ptsname_r, /proc, close_range
 │   ├── pty_darwin.zig      # macOS-specific: execvp+environ, sysctl, FD close loop
-│   └── windows/
-│       ├── pty.zig         # Windows-specific: ConPTY (CreatePseudoConsole + pipes)
+│   ├── pty_windows.zig     # Windows-specific: ConPTY (CreatePseudoConsole + pipes)
+│   └── win/
 │       ├── napi.zig        # NAPI↔lib.zig bridge for Windows (spawn, write, resize, kill, close)
 │       └── node_api.def    # NAPI import definitions (→ .lib via zig dlltool)
 ├── src/                    # TypeScript wrapper + tests
@@ -76,9 +76,9 @@ Terminal (standalone, src/terminal.ts) — Bun-compatible callbacks, AsyncDispos
 
 The Zig code is split into two layers:
 
-1. **Pure Zig library** (`lib.zig` + `pty_linux.zig` + `pty_darwin.zig` + `windows/pty.zig` + `termios.zig`) — No NAPI dependency. `lib.zig` dispatches to platform-specific modules via `builtin.os.tag`. Unix exposes `forkPty`, `openPty`, `resize`, `getProcessName`, `waitForExit`. Windows exposes `spawnConPty`, `readOutput`, `writeInput`, `resizeConsole`, `waitForExit`, `killProcess`, `closePty`. Can be imported by any Zig project via `@import("zigpty")`.
+1. **Pure Zig library** (`lib.zig` + `pty_linux.zig` + `pty_darwin.zig` + `pty_windows.zig` + `termios.zig`) — No NAPI dependency. `lib.zig` dispatches to platform-specific modules via `builtin.os.tag`. Unix exposes `forkPty`, `openPty`, `resize`, `getProcessName`, `waitForExit`. Windows exposes `spawnConPty`, `readOutput`, `writeInput`, `resizeConsole`, `waitForExit`, `killProcess`, `closePty`. Can be imported by any Zig project via `@import("zigpty")`.
 
-2. **NAPI wrapper** (`root.zig` + `pty.zig` + `pty_unix.zig` + `windows/napi.zig` + `napi.zig`) — Thin bridge that parses NAPI arguments and calls `lib.zig`. `pty.zig` contains shared helpers and re-exports platform-specific symbols. `pty_unix.zig` handles Unix (fork, open, resize, process). `windows/napi.zig` handles Windows ConPTY (spawn, write, resize, kill, close). Registers different exports on Windows vs Unix. Manages `napi_threadsafe_function` for exit monitoring and (on Windows) data streaming.
+2. **NAPI wrapper** (`root.zig` + `pty.zig` + `pty_unix.zig` + `win/napi.zig` + `napi.zig`) — Thin bridge that parses NAPI arguments and calls `lib.zig`. `pty.zig` contains shared helpers and re-exports platform-specific symbols. `pty_unix.zig` handles Unix (fork, open, resize, process). `win/napi.zig` handles Windows ConPTY (spawn, write, resize, kill, close). Registers different exports on Windows vs Unix. Manages `napi_threadsafe_function` for exit monitoring and (on Windows) data streaming.
 
 ## Build
 
@@ -138,7 +138,7 @@ Types: `ForkOptions`, `ForkResult`, `OpenResult`, `ExitInfo`, `PtyError`, `Fd`, 
 
 ### Windows
 
-Available via `lib.win` (re-exports `windows/pty.zig`):
+Available via `lib.win` (re-exports `pty_windows.zig`):
 
 | Function         | Signature                                              | Description                          |
 | ---------------- | ------------------------------------------------------ | ------------------------------------ |
@@ -215,7 +215,7 @@ Options: `{ timeout?: number }` (default: 30s). Throws on timeout.
 - **BasePty abstract class**: Shared state management, event listeners, `waitFor`, and exit handling extracted into `_base.ts`. `UnixPty` and `WindowsPty` extend it with platform-specific logic only.
 - **Raw NAPI over tokota/zig-napi**: Zero dependency risk. `napi.zig` is ~240 lines of pure `extern` declarations.
 - **Pure extern declarations**: `forkpty`, `openpty`, `waitpid`, etc. declared as `extern fn` — no `@cImport` for platform-specific headers. NAPI and Windows kernel32 are also pure Zig externs.
-- **Platform dispatch via `builtin.os.tag`**: `lib.zig` imports `pty_linux.zig`, `pty_darwin.zig`, or `windows/pty.zig` at comptime. Unix and Windows APIs are conditionally compiled.
+- **Platform dispatch via `builtin.os.tag`**: `lib.zig` imports `pty_linux.zig`, `pty_darwin.zig`, or `pty_windows.zig` at comptime. Unix and Windows APIs are conditionally compiled.
 - **Signal blocking around fork** (Unix): Prevents race conditions (matches node-pty behavior).
 - **`close_range` syscall with `/proc/self/fd` fallback** (Linux): Direct syscall (not libc extern) to close leaked FDs — avoids musl symbol issues.
 - **FD close loop** (macOS): No `/proc/self/fd` or `close_range` — closes FDs 3..255.
@@ -227,7 +227,7 @@ Options: `{ timeout?: number }` (default: 30s). Throws on timeout.
 - **Zig read thread for Windows**: Reads ConPTY output pipe in a background thread, forwards data to JS via `napi_threadsafe_function`. Avoids pipe-fd ↔ Node.js compatibility issues.
 - **Deferred calls on Windows**: `WindowsPty` buffers write/resize calls until first data is received (prevents ConPTY deadlock on startup).
 - **No libc on Windows**: Windows builds don't link libc — uses `page_allocator` instead of `c_allocator`.
-- **NAPI import lib via dlltool** (Windows): `windows/node_api.def` lists NAPI symbols imported from `node.exe`. Build generates import `.lib` at build time via `zig dlltool` — no checked-in binaries.
+- **NAPI import lib via dlltool** (Windows): `win/node_api.def` lists NAPI symbols imported from `node.exe`. Build generates import `.lib` at build time via `zig dlltool` — no checked-in binaries.
 - **ConPTY flush on exit** (Windows): `ClosePseudoConsole` must be called after process exit to flush remaining output. Input pipe is closed first, then pseudo console, while read thread drains output concurrently to avoid deadlock.
 - **`tty.ReadStream`** for reading PTY output on Unix (not `net.Socket` — PTY fds are TTY type).
 - **Async `fs.write`** with EAGAIN retry for writing on Unix (non-blocking write queue with `setImmediate` backoff).

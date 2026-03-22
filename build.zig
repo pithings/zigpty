@@ -62,7 +62,7 @@ fn addTarget(b: *std.Build, clean: *std.Build.Step, target: std.Build.ResolvedTa
         };
         const dlltool = b.addSystemCommand(&.{
             "zig", "dlltool",
-            "-d",  b.pathFromRoot("zig/windows/node_api.def"),
+            "-d",  b.pathFromRoot("zig/win/node_api.def"),
             "-m",  machine,
             "-D",  "node.exe",
         });

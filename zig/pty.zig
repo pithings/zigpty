@@ -11,7 +11,7 @@ pub const alloc = if (is_windows) std.heap.page_allocator else std.heap.c_alloca
 // --- Platform-specific NAPI modules ---
 
 const unix_napi = if (!is_windows) @import("pty_unix.zig") else struct {};
-const win_napi = if (is_windows) @import("windows/napi.zig") else struct {};
+const win_napi = if (is_windows) @import("win/napi.zig") else struct {};
 
 // Unix re-exports
 pub const fork = if (!is_windows) unix_napi.fork else void;

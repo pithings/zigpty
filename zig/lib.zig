@@ -6,9 +6,9 @@ const builtin = @import("builtin");
 pub const is_windows = builtin.os.tag == .windows;
 
 const platform = switch (builtin.os.tag) {
-    .linux => @import("linux/pty.zig"),
-    .macos => @import("darwin/pty.zig"),
-    .windows => @import("windows/pty.zig"),
+    .linux => @import("pty_linux.zig"),
+    .macos => @import("pty_darwin.zig"),
+    .windows => @import("pty_windows.zig"),
     else => @compileError("unsupported OS: " ++ @tagName(builtin.os.tag)),
 };
 
