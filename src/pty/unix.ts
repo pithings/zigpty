@@ -18,7 +18,7 @@ const UNIX_SANITIZE_KEYS = ["TMUX", "TMUX_PANE", "STY", "WINDOW", "WINDOWID", "T
 export class UnixPty extends BasePty {
   private _fd: number;
   private _pty: string;
-  private _readable: tty.ReadStream;
+  private _readable: tty.ReadStream | undefined;
   private _encoding: BufferEncoding | null;
   private _flowControlPause: string;
   private _flowControlResume: string;
@@ -33,7 +33,7 @@ export class UnixPty extends BasePty {
     const encoding = options?.encoding !== undefined ? options.encoding : "utf8";
     const uid = options?.uid ?? -1;
     const gid = options?.gid ?? -1;
-    const useUtf8 = encoding === "utf8" || encoding === null;
+    const useUtf8 = encoding === "utf8";
 
     const envObj = options?.env ?? process.env;
     const envPairs = buildEnvPairs(envObj, options?.name, UNIX_SANITIZE_KEYS);
@@ -41,7 +41,7 @@ export class UnixPty extends BasePty {
     const result = native.fork(file, args, envPairs, cwd, cols, rows, uid, gid, useUtf8, (info) => {
       this._handleExit(info);
       try {
-        this._readable.destroy();
+        this._readable?.destroy();
       } catch {}
     });
 
@@ -53,25 +53,28 @@ export class UnixPty extends BasePty {
     this._flowControlResume = options?.flowControlResume ?? DEFAULT_FLOW_RESUME;
     this._wq = new WriteQueue(this._fd);
 
-    // Attach terminal to fork's fd if provided
+    // When a Terminal is attached, it owns the ReadStream on this fd.
+    // Only create our own ReadStream when there's no terminal.
     if (this._terminal) {
       this._terminal._attachUnixFd(this._fd);
-    }
-
-    // Create readable stream from master fd
-    this._readable = new tty.ReadStream(this._fd);
-    if (encoding) {
-      this._readable.setEncoding(encoding);
-    }
-    this._readable.on("data", (data: string | Buffer) => {
-      if (this.handleFlowControl && typeof data === "string") {
-        if (data === this._flowControlPause || data === this._flowControlResume) return;
+      // Use a dummy ReadStream ref for pause/resume/destroy in exit handler
+      this._readable = undefined!;
+    } else {
+      // Create readable stream from master fd
+      this._readable = new tty.ReadStream(this._fd);
+      if (encoding) {
+        this._readable.setEncoding(encoding);
       }
-      for (const listener of this._dataListeners) {
-        listener(data);
-      }
-    });
-    this._readable.on("error", () => {});
+      this._readable.on("data", (data: string | Buffer) => {
+        if (this.handleFlowControl && typeof data === "string") {
+          if (data === this._flowControlPause || data === this._flowControlResume) return;
+        }
+        for (const listener of this._dataListeners) {
+          listener(data);
+        }
+      });
+      this._readable.on("error", () => {});
+    }
   }
 
   get process(): string {
@@ -107,11 +110,11 @@ export class UnixPty extends BasePty {
   }
 
   pause(): void {
-    this._readable.pause();
+    this._readable?.pause();
   }
 
   resume(): void {
-    this._readable.resume();
+    this._readable?.resume();
   }
 
   close(): void {
@@ -121,7 +124,7 @@ export class UnixPty extends BasePty {
     this._wq.close();
 
     try {
-      this._readable.destroy();
+      this._readable?.destroy();
     } catch {}
 
     try {

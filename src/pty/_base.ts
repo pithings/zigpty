@@ -111,13 +111,14 @@ export abstract class BasePty implements IPty {
       };
 
       if (terminal) {
+        // When terminal is attached, it owns the ReadStream — listen only via terminal
         terminalListener = onChunk;
         terminal._dataListeners.push(terminalListener);
+      } else {
+        disposable = pty.onData((data) => {
+          onChunk(typeof data === "string" ? data : data.toString());
+        });
       }
-
-      disposable = pty.onData((data) => {
-        onChunk(typeof data === "string" ? data : data.toString());
-      });
     });
   }
 
@@ -125,12 +126,13 @@ export abstract class BasePty implements IPty {
     this._closed = true;
     this._exitCode = info.exitCode;
     this._onExitCallback?.(info.exitCode, info.signal);
-    for (const listener of this._exitListeners) {
+    const listeners = [...this._exitListeners];
+    this._dataListeners.length = 0;
+    this._exitListeners.length = 0;
+    for (const listener of listeners) {
       listener(info);
     }
     this._resolveExited(info.exitCode);
-    this._dataListeners.length = 0;
-    this._exitListeners.length = 0;
   }
 
   abstract get process(): string;

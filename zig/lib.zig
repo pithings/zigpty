@@ -130,8 +130,12 @@ fn forkPtyUnix(opts: ForkOptions) PtyError!ForkResult {
             std.process.exit(1);
         }
 
-        if (opts.gid) |gid| _ = std.c.setgid(gid);
-        if (opts.uid) |uid| _ = std.c.setuid(uid);
+        if (opts.gid) |gid| {
+            if (std.c.setgid(gid) != 0) std.process.exit(1);
+        }
+        if (opts.uid) |uid| {
+            if (std.c.setuid(uid) != 0) std.process.exit(1);
+        }
 
         platform.closeExcessFds();
 

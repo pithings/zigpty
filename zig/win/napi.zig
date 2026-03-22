@@ -109,6 +109,9 @@ fn winExitMonitorThread(ctx: *WinConPtyContext) void {
         .blocking,
     );
     _ = napi.napi_release_threadsafe_function(ctx.exit_tsfn, .release);
+
+    // Free the context — all handles are closed and tsfns released
+    alloc.destroy(ctx);
 }
 
 /// spawn(file, args, env, cwd, cols, rows, onData, onExit) → { pid, handle }

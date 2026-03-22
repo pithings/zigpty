@@ -211,6 +211,11 @@ fn resizeImpl(env: napi.napi_env, info: napi.napi_callback_info) !void {
     if (argc >= 4) _ = napi.napi_get_value_int32(env, argv[3], &xpixel_i32);
     if (argc >= 5) _ = napi.napi_get_value_int32(env, argv[4], &ypixel_i32);
 
+    if (fd_i32 < 0) {
+        _ = napi.napi_throw_error(env, null, "invalid fd");
+        return error.NapiFailed;
+    }
+
     lib.resize(
         @intCast(fd_i32),
         pty.clampU16(cols_i32),
@@ -235,6 +240,8 @@ fn getProcessImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_
 
     var fd_i32: i32 = 0;
     try napi.check(env, napi.napi_get_value_int32(env, argv[0], &fd_i32));
+
+    if (fd_i32 < 0) return pty.returnUndef(env);
 
     var buf: [4096]u8 = undefined;
     const name = lib.getProcessName(@intCast(fd_i32), &buf) orelse {

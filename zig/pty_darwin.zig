@@ -55,18 +55,23 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
 pub fn resetSignalHandlers() void {
     var sa = std.mem.zeroes(std.c.Sigaction);
     sa.handler = .{ .handler = std.c.SIG.DFL };
-    var i: u6 = 1;
+    var i: u8 = 1;
     while (i < std.c.NSIG) : (i += 1) {
         if (i == posix.SIG.KILL or i == posix.SIG.STOP) continue;
         _ = std.c.sigaction(i, &sa, null);
     }
 }
 
+extern fn sysconf(name: c_int) c_long;
+
 pub fn closeExcessFds() void {
     // macOS has no close_range or /proc/self/fd.
-    // Close FDs 3..256 (reasonable upper bound).
+    // Use sysconf(_SC_OPEN_MAX) to get the actual limit.
+    const SC_OPEN_MAX = 5; // _SC_OPEN_MAX on macOS
+    const max_fd = sysconf(SC_OPEN_MAX);
+    const limit: c_int = if (max_fd > 0) @intCast(max_fd) else 256;
     var fd: c_int = 3;
-    while (fd < 256) : (fd += 1) {
+    while (fd < limit) : (fd += 1) {
         _ = std.c.close(fd);
     }
 }

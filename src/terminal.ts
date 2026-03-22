@@ -128,10 +128,14 @@ export class Terminal implements AsyncDisposable {
       }
     } else {
       this._destroyReader();
-      if (this._standalone && this.stdin >= 0) {
-        try {
-          fs.closeSync(this.stdin);
-        } catch {}
+      if (this._standalone) {
+        if (this.stdout >= 0) {
+          try { fs.closeSync(this.stdout); } catch {}
+          this.stdout = -1;
+        }
+        if (this.stdin >= 0) {
+          try { fs.closeSync(this.stdin); } catch {}
+        }
       }
       this.stdin = -1;
     }
@@ -149,6 +153,10 @@ export class Terminal implements AsyncDisposable {
     this._standalone = false;
     this._destroyReader();
     // Close standalone PTY fds if we had them
+    if (this.stdout >= 0) {
+      try { fs.closeSync(this.stdout); } catch {}
+      this.stdout = -1;
+    }
     if (this.stdin >= 0) {
       try { fs.closeSync(this.stdin); } catch {}
     }

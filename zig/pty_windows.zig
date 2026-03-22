@@ -426,28 +426,16 @@ pub fn utf8ToUtf16Alloc(alloc: std.mem.Allocator, utf8: []const u8) ![:0]u16 {
 
 /// Build a Windows environment block (null-delimited, double-null-terminated UTF-16)
 /// from an array of "KEY=VALUE" UTF-8 strings.
-pub fn buildEnvBlock(alloc: std.mem.Allocator, env_pairs: []const []const u8) ![]u16 {
-    // Calculate total length
-    var total_len: usize = 0;
+pub fn buildEnvBlock(a: std.mem.Allocator, env_pairs: []const []const u8) ![]u16 {
+    var buf = std.ArrayListUnmanaged(u16){};
     for (env_pairs) |pair| {
-        const wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pair);
-        defer alloc.free(wide);
-        total_len += wide.len + 1; // include null terminator
+        const wide = try std.unicode.utf8ToUtf16LeAllocZ(a, pair);
+        defer a.free(wide);
+        try buf.appendSlice(a, wide);
+        try buf.append(a, 0); // null terminator after each pair
     }
-    total_len += 1; // double-null terminator
-
-    const block = try alloc.alloc(u16, total_len);
-    var offset: usize = 0;
-    for (env_pairs) |pair| {
-        const wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pair);
-        defer alloc.free(wide);
-        @memcpy(block[offset .. offset + wide.len], wide);
-        block[offset + wide.len] = 0;
-        offset += wide.len + 1;
-    }
-    block[offset] = 0; // double-null
-
-    return block;
+    try buf.append(a, 0); // double-null terminator
+    return buf.toOwnedSlice(a);
 }
 
 /// Build a Windows command line string from file and args.

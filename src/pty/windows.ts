@@ -20,7 +20,7 @@ export class WindowsPty extends BasePty {
     this._encoding = options?.encoding !== undefined ? options.encoding : "utf8";
 
     const cwd = options?.cwd ?? process.cwd();
-    const envObj = options?.env ?? (process.env as Record<string, string>);
+    const envObj = options?.env ?? process.env;
     const envPairs = buildEnvPairs(envObj, options?.name);
 
     const result = native.spawn(file, args, envPairs, cwd, cols, rows, (data: Buffer) => {
@@ -105,8 +105,12 @@ export class WindowsPty extends BasePty {
     if (this._closed) return;
     this._closed = true;
     this._deferredCalls.length = 0;
+    // Kill the process — the exit monitor thread handles ClosePseudoConsole
+    // and cleanup. Calling native.close() from the JS thread can deadlock
+    // because ClosePseudoConsole blocks until the output pipe is drained,
+    // but the tsfn callback needs the JS thread to fire.
     try {
-      this._native.close(this._handle);
+      this._native.kill(this._handle);
     } catch {}
   }
 }
