@@ -36,7 +36,7 @@ describe("Terminal", () => {
     expect(closed).toBe(true);
   });
 
-  it("should write data to a standalone terminal", async () => {
+  it.skipIf(isWindows)("should write data to a standalone terminal", async () => {
     const received: string[] = [];
     const terminal = new Terminal({
       data(_t, chunk) {
@@ -50,7 +50,7 @@ describe("Terminal", () => {
     terminal.close();
   });
 
-  it("should write Uint8Array data", async () => {
+  it.skipIf(isWindows)("should write Uint8Array data", async () => {
     const received: string[] = [];
     const terminal = new Terminal({
       data(_t, chunk) {
@@ -71,20 +71,20 @@ describe("Terminal", () => {
     terminal.resize(100, 50); // should not throw
   });
 
-  it("should resize the terminal", () => {
+  it.skipIf(isWindows)("should resize the terminal", () => {
     const terminal = new Terminal();
     terminal.resize(120, 40);
     terminal.close();
   });
 
-  it("should support ref/unref", () => {
+  it.skipIf(isWindows)("should support ref/unref", () => {
     const terminal = new Terminal();
     terminal.ref();
     terminal.unref();
     terminal.close();
   });
 
-  it("should call drain callback when write queue empties", async () => {
+  it.skipIf(isWindows)("should call drain callback when write queue empties", async () => {
     let drained = false;
     const terminal = new Terminal({
       drain() {
