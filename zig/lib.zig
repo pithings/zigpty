@@ -172,7 +172,7 @@ fn openPtyUnix(cols: u16, rows: u16) PtyError!OpenResult {
     };
 
     if (unix.ttyname_r(slave_fd, &result.pty_name, result.pty_name.len) == 0) {
-        result.pty_name_len = std.mem.len(@as([*:0]const u8, @ptrCast(&result.pty_name)));
+        result.pty_name_len = std.mem.indexOfScalar(u8, &result.pty_name, 0) orelse result.pty_name.len;
     }
 
     return result;

@@ -65,6 +65,13 @@ pub fn getStringAlloc(env: napi.napi_env, val: napi.napi_value, a: std.mem.Alloc
     return buf;
 }
 
+/// Safely convert an i32 (from JS NAPI) to u16, clamping to [0, 65535].
+pub fn clampU16(val: i32) u16 {
+    if (val <= 0) return 0;
+    if (val > std.math.maxInt(u16)) return std.math.maxInt(u16);
+    return @intCast(val);
+}
+
 pub fn returnUndef(env: napi.napi_env) napi.napi_value {
     var undef: napi.napi_value = undefined;
     _ = napi.napi_get_undefined(env, &undef);

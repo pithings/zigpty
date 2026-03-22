@@ -213,6 +213,25 @@ describeUnix("resize (unix)", () => {
 
     pty.kill("SIGTERM");
   });
+
+  it("should handle edge-case dimensions without crashing", () => {
+    const pty = spawn("/bin/sh");
+
+    // Zero dimensions
+    pty.resize(0, 0);
+    expect(pty.cols).toBe(0);
+    expect(pty.rows).toBe(0);
+
+    // Very large dimensions (clamped to u16 max internally)
+    pty.resize(99999, 99999);
+
+    // Restore valid size
+    pty.resize(80, 24);
+    expect(pty.cols).toBe(80);
+    expect(pty.rows).toBe(24);
+
+    pty.kill("SIGTERM");
+  });
 });
 
 describe("close", () => {

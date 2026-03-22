@@ -410,16 +410,6 @@ pub fn closePty(result: *SpawnResult) void {
     result.process = INVALID_HANDLE;
 }
 
-/// Get process name by PID. Not easily available on Windows without snapshots.
-/// Returns null — callers should fall back to the initial process name.
-pub fn getProcessName(_pid: DWORD, _buf: []u8) ?[]const u8 {
-    _ = _pid;
-    _ = _buf;
-    // TODO: Could use CreateToolhelp32Snapshot + Process32First/Next
-    // For now, return null (TS layer falls back to initial file name)
-    return null;
-}
-
 // --- Helpers ---
 
 pub fn closeHandle(h: HANDLE) void {

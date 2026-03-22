@@ -43,8 +43,9 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
     const MAXCOMLEN = 16;
     if (size < P_COMM_OFFSET + MAXCOMLEN) return null;
 
-    const comm: [*:0]const u8 = @ptrCast(info_buf[P_COMM_OFFSET..].ptr);
-    const len = std.mem.len(comm);
+    // Bounded scan — p_comm is at most MAXCOMLEN bytes, avoid reading past buffer
+    const comm = info_buf[P_COMM_OFFSET..][0..MAXCOMLEN];
+    const len = std.mem.indexOfScalar(u8, comm, 0) orelse MAXCOMLEN;
     if (len == 0 or len > buf.len) return null;
 
     @memcpy(buf[0..len], comm[0..len]);

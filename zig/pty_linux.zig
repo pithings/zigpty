@@ -13,7 +13,7 @@ pub fn execChild(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: 
 
 pub fn getPtyName(fd: c_int, buf: *[256]u8) usize {
     if (ptsname_r(fd, buf, buf.len) == 0) {
-        return std.mem.len(@as([*:0]const u8, @ptrCast(buf)));
+        return std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
     }
     return 0;
 }
@@ -51,15 +51,32 @@ pub fn closeExcessFds() void {
     const rc = linux.syscall3(.close_range, 3, std.math.maxInt(c_uint), 0);
     if (linux.E.init(rc) == .SUCCESS) return;
 
-    // Fallback: iterate /proc/self/fd
-    var dir = std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true }) catch return;
-    defer dir.close();
+    // Fallback: raw getdents64 on /proc/self/fd (no allocator, async-signal-safe)
+    const dir_fd = linux.open("/proc/self/fd", .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+    if (linux.E.init(dir_fd) != .SUCCESS) {
+        // Last resort: brute-force close FDs 3..256
+        var fd: c_int = 3;
+        while (fd < 256) : (fd += 1) _ = linux.close(@intCast(fd));
+        return;
+    }
+    defer _ = linux.close(@intCast(dir_fd));
 
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        const fd_num = std.fmt.parseInt(posix.fd_t, entry.name, 10) catch continue;
-        if (fd_num > 2 and fd_num != dir.fd) {
-            posix.close(fd_num);
+    var buf: [1024]u8 = undefined;
+    while (true) {
+        const nread = linux.getdents64(@intCast(dir_fd), @ptrCast(&buf), buf.len);
+        if (linux.E.init(nread) != .SUCCESS or nread == 0) break;
+
+        var offset: usize = 0;
+        while (offset < nread) {
+            const d: *align(1) const linux.dirent64 = @ptrCast(buf[offset..]);
+            offset += d.reclen;
+
+            // Parse fd number from name (null-terminated after fixed fields)
+            const name_ptr: [*:0]const u8 = @ptrCast(&d.name);
+            const fd_num = std.fmt.parseInt(posix.fd_t, std.mem.sliceTo(name_ptr, 0), 10) catch continue;
+            if (fd_num > 2 and fd_num != @as(posix.fd_t, @intCast(dir_fd))) {
+                _ = linux.close(@intCast(fd_num));
+            }
         }
     }
 }

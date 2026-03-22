@@ -176,8 +176,8 @@ fn spawnImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value
         return error.NapiFailed;
     };
 
-    const cols: u16 = @intCast(@as(u16, @bitCast(@as(i16, @truncate(cols_i32)))));
-    const rows: u16 = @intCast(@as(u16, @bitCast(@as(i16, @truncate(rows_i32)))));
+    const cols = pty.clampU16(cols_i32);
+    const rows = pty.clampU16(rows_i32);
 
     // Phase 1: Create ConPTY (pipes + pseudo console, no process yet)
     var setup = win.createConPty(cols, rows) catch {
@@ -226,6 +226,10 @@ fn spawnImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value
     // before the process produces any output — prevents data loss for
     // fast-exiting processes (e.g. cmd.exe /c echo hello).
     ctx.read_thread = std.Thread.spawn(.{}, winReadThread, .{ctx}) catch {
+        _ = napi.napi_release_threadsafe_function(ctx.data_tsfn, .abort);
+        win.closeHandle(setup.conin);
+        win.closeHandle(setup.conout);
+        win.closePseudoConsole(setup.hpc);
         alloc.destroy(ctx);
         _ = napi.napi_throw_error(env, null, "failed to spawn read thread");
         return error.NapiFailed;
@@ -237,9 +241,10 @@ fn spawnImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value
         win.closeHandle(setup.conout);
         ctx.spawn_result.conout = win.INVALID_HANDLE;
         if (ctx.read_thread) |rt| rt.join();
-        alloc.destroy(ctx);
+        // data_tsfn already released by read thread via winReadThread defer
         win.closeHandle(setup.conin);
         win.closePseudoConsole(setup.hpc);
+        alloc.destroy(ctx);
         _ = napi.napi_throw_error(env, null, "ConPTY process spawn failed");
         return error.NapiFailed;
     };
@@ -266,6 +271,13 @@ fn spawnImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value
 
     // Spawn exit monitor thread
     ctx.exit_thread = std.Thread.spawn(.{}, winExitMonitorThread, .{ctx}) catch {
+        _ = napi.napi_release_threadsafe_function(ctx.exit_tsfn, .abort);
+        // Kill process and let read thread drain + release data_tsfn
+        win.killProcess(ctx.spawn_result.process, 1);
+        win.closeConin(&ctx.spawn_result);
+        win.closePseudoConsole(ctx.spawn_result.hpc);
+        if (ctx.read_thread) |rt| rt.join();
+        win.closePty(&ctx.spawn_result);
         alloc.destroy(ctx);
         _ = napi.napi_throw_error(env, null, "failed to spawn exit thread");
         return error.NapiFailed;
@@ -336,8 +348,8 @@ fn resizeImpl(env: napi.napi_env, info: napi.napi_callback_info) !void {
 
     win.resizeConsole(
         ctx.spawn_result.hpc,
-        @intCast(@as(u16, @bitCast(@as(i16, @truncate(cols_i32))))),
-        @intCast(@as(u16, @bitCast(@as(i16, @truncate(rows_i32))))),
+        pty.clampU16(cols_i32),
+        pty.clampU16(rows_i32),
     ) catch {
         _ = napi.napi_throw_error(env, null, "resize failed");
         return error.NapiFailed;

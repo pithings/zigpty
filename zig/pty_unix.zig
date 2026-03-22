@@ -95,8 +95,8 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         .argv = @ptrCast(exec_argv.ptr),
         .envp = @ptrCast(exec_envp.ptr),
         .cwd = cwd.ptr,
-        .cols = @intCast(@as(u16, @bitCast(@as(i16, @truncate(cols_i32))))),
-        .rows = @intCast(@as(u16, @bitCast(@as(i16, @truncate(rows_i32))))),
+        .cols = pty.clampU16(cols_i32),
+        .rows = pty.clampU16(rows_i32),
         .uid = if (uid_i32 >= 0) @intCast(uid_i32) else null,
         .gid = if (gid_i32 >= 0) @intCast(gid_i32) else null,
         .use_utf8 = use_utf8,
@@ -126,12 +126,14 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
     _ = napi.napi_unref_threadsafe_function(env, tsfn);
 
     const ctx = alloc.create(ExitContext) catch {
+        _ = napi.napi_release_threadsafe_function(tsfn, .abort);
         _ = napi.napi_throw_error(env, null, "failed to allocate exit context");
         return error.NapiFailed;
     };
     ctx.* = .{ .tsfn = tsfn, .pid = result.pid };
 
     _ = std.Thread.spawn(.{}, exitMonitorThread, .{ctx}) catch {
+        _ = napi.napi_release_threadsafe_function(tsfn, .abort);
         alloc.destroy(ctx);
         _ = napi.napi_throw_error(env, null, "failed to spawn exit monitor thread");
         return error.NapiFailed;
@@ -167,8 +169,8 @@ fn openImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
     if (argc >= 2) try napi.check(env, napi.napi_get_value_int32(env, argv[1], &rows_i32));
 
     const result = lib.openPty(
-        @intCast(@as(u16, @bitCast(@as(i16, @truncate(cols_i32))))),
-        @intCast(@as(u16, @bitCast(@as(i16, @truncate(rows_i32))))),
+        pty.clampU16(cols_i32),
+        pty.clampU16(rows_i32),
     ) catch {
         _ = napi.napi_throw_error(env, null, "openpty failed");
         return error.NapiFailed;
@@ -211,10 +213,10 @@ fn resizeImpl(env: napi.napi_env, info: napi.napi_callback_info) !void {
 
     lib.resize(
         @intCast(fd_i32),
-        @intCast(@as(u16, @bitCast(@as(i16, @truncate(cols_i32))))),
-        @intCast(@as(u16, @bitCast(@as(i16, @truncate(rows_i32))))),
-        @intCast(@as(u16, @bitCast(@as(i16, @truncate(xpixel_i32))))),
-        @intCast(@as(u16, @bitCast(@as(i16, @truncate(ypixel_i32))))),
+        pty.clampU16(cols_i32),
+        pty.clampU16(rows_i32),
+        pty.clampU16(xpixel_i32),
+        pty.clampU16(ypixel_i32),
     ) catch {
         _ = napi.napi_throw_error(env, null, "ioctl TIOCSWINSZ failed");
         return error.NapiFailed;
