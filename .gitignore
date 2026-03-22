@@ -5,3 +5,4 @@ zig-out
 prebuilds
 coverage
 .zig-cache
+playground*

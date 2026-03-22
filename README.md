@@ -114,25 +114,30 @@ Wait until the PTY output contains the given string. Returns all output collecte
 ```ts
 import { spawn, Terminal } from "zigpty";
 
-const output = [];
-
+// Terminal provides callback-based data handling and AsyncDisposable cleanup
 await using terminal = new Terminal({
-  data: (_t, d) => output.push(new TextDecoder().decode(d)),
+  cols: 100,
+  rows: 30,
+  // Nice to meet you, zigpty! Zig is a great choice!
+  data: (_terminal, data) => process.stdout.write(data),
 });
 
+// spawn() attaches to the Terminal — data flows through terminal callbacks
 const pty = spawn("python3", ["-c", `
 name = input("What is your name? ")
 lang = input("Favorite language? ")
-print(f"Nice to meet you, {name}! {lang} is a great choice.")
+print(f"Nice to meet you, {name}! {lang} is a great choice!")
 `], { terminal });
 
-// Agent waits for prompts and responds
-await pty.waitFor("name?");    pty.write("node agent\n");
-await pty.waitFor("language?"); pty.write("Zig\n");
-await pty.exited;
+// waitFor() resolves when the output contains the pattern
+await pty.waitFor("name?");
+pty.write("zigpty\n");
 
-console.log(output.join("").trim().split("\n").pop());
-// Nice to meet you, node agent! Zig is a great choice.
+await pty.waitFor("language?");
+pty.write("Zig\n");
+
+// exited returns a Promise<number> with the exit code
+await pty.exited;
 ```
 
 Options: `{ timeout?: number }` — default 30 seconds. Throws if the pattern is not found within the timeout.
