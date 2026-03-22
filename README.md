@@ -51,7 +51,9 @@ The `Terminal` class can be reused across multiple spawns and supports `AsyncDis
 import { spawn, Terminal } from "zigpty";
 
 await using terminal = new Terminal({
-  data(term, data) { process.stdout.write(data); },
+  data(term, data) {
+    process.stdout.write(data);
+  },
 });
 
 const pty = spawn("/bin/sh", ["-c", "echo hello"], { terminal });
@@ -69,15 +71,15 @@ Spawn a process inside a new PTY.
 
 ```ts
 interface IPtyOptions {
-  cols?: number;                    // Default: 80
-  rows?: number;                    // Default: 24
-  cwd?: string;                     // Default: process.cwd()
-  env?: Record<string, string>;     // Default: process.env
-  name?: string;                    // Sets TERM (e.g. "xterm-256color")
+  cols?: number; // Default: 80
+  rows?: number; // Default: 24
+  cwd?: string; // Default: process.cwd()
+  env?: Record<string, string>; // Default: process.env
+  name?: string; // Sets TERM (e.g. "xterm-256color")
   encoding?: BufferEncoding | null; // Default: "utf8", null for raw Buffer
-  uid?: number;                     // Unix user ID
-  gid?: number;                     // Unix group ID
-  handleFlowControl?: boolean;      // Intercept XON/XOFF (default: false)
+  uid?: number; // Unix user ID
+  gid?: number; // Unix group ID
+  handleFlowControl?: boolean; // Intercept XON/XOFF (default: false)
   terminal?: TerminalOptions | Terminal; // Bun-compatible terminal callbacks
   onExit?: (exitCode: number, signal: number) => void;
 }
@@ -90,7 +92,7 @@ interface IPty {
   pid: number;
   cols: number;
   rows: number;
-  readonly process: string;         // Foreground process name
+  readonly process: string; // Foreground process name
   readonly exited: Promise<number>; // Resolves with exit code
   readonly exitCode: number | null; // Exit code or null if running
 
@@ -99,7 +101,7 @@ interface IPty {
 
   write(data: string): void;
   resize(cols: number, rows: number): void;
-  kill(signal?: string): void;      // Default: SIGHUP
+  kill(signal?: string): void; // Default: SIGHUP
   pause(): void;
   resume(): void;
   close(): void;
@@ -123,11 +125,18 @@ await using terminal = new Terminal({
 });
 
 // spawn() attaches to the Terminal — data flows through terminal callbacks
-const pty = spawn("python3", ["-c", `
+const pty = spawn(
+  "python3",
+  [
+    "-c",
+    `
 name = input("What is your name? ")
 lang = input("Favorite language? ")
 print(f"Nice to meet you, {name}! {lang} is a great choice!")
-`], { terminal });
+`,
+  ],
+  { terminal },
+);
 
 // waitFor() resolves when the output contains the pattern
 await pty.waitFor("name?");
@@ -154,16 +163,16 @@ const { master, slave, pty } = open({ cols: 80, rows: 24 });
 
 ## Platform support
 
-| Platform             | Status  |
-| -------------------- | ------- |
-| Linux x64 (glibc)    | ✅       |
-| Linux x64 (musl)     | ✅       |
-| Linux arm64 (glibc)  | ✅       |
-| Linux arm64 (musl)   | ✅       |
-| macOS x64            | ✅       |
-| macOS arm64          | ✅       |
-| Windows x64          | ✅       |
-| Windows arm64        | ✅       |
+| Platform            | Status |
+| ------------------- | ------ |
+| Linux x64 (glibc)   | ✅     |
+| Linux x64 (musl)    | ✅     |
+| Linux arm64 (glibc) | ✅     |
+| Linux arm64 (musl)  | ✅     |
+| macOS x64           | ✅     |
+| macOS arm64         | ✅     |
+| Windows x64         | ✅     |
+| Windows arm64       | ✅     |
 
 All 8 platform binaries are prebuilt — no compiler needed at install time. On Linux, the native loader tries glibc first and falls back to musl automatically.
 
@@ -225,6 +234,14 @@ zig build --release    # Release build
 bun run build          # Build + bundle TypeScript
 bun test               # Run tests
 ```
+
+## Sponsors
+
+<p align="center">
+  <a href="https://sponsors.pi0.io/">
+    <img src="https://sponsors.pi0.io/sponsors.svg?1">
+  </a>
+</p>
 
 ## Credits
 
