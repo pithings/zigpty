@@ -35,6 +35,90 @@ describe("Terminal", () => {
     }
     expect(closed).toBe(true);
   });
+
+  it("should write data to a standalone terminal", async () => {
+    const received: string[] = [];
+    const terminal = new Terminal({
+      data(_t, chunk) {
+        received.push(new TextDecoder().decode(chunk));
+      },
+    });
+
+    terminal.write("hello\n");
+    await new Promise((r) => setTimeout(r, 200));
+    expect(received.join("")).toContain("hello");
+    terminal.close();
+  });
+
+  it("should write Uint8Array data", async () => {
+    const received: string[] = [];
+    const terminal = new Terminal({
+      data(_t, chunk) {
+        received.push(new TextDecoder().decode(chunk));
+      },
+    });
+
+    terminal.write(new Uint8Array([104, 105, 10])); // "hi\n"
+    await new Promise((r) => setTimeout(r, 200));
+    expect(received.join("")).toContain("hi");
+    terminal.close();
+  });
+
+  it("should no-op write/resize when closed", () => {
+    const terminal = new Terminal();
+    terminal.close();
+    expect(terminal.write("test")).toBe(0);
+    terminal.resize(100, 50); // should not throw
+  });
+
+  it("should resize the terminal", () => {
+    const terminal = new Terminal();
+    terminal.resize(120, 40);
+    terminal.close();
+  });
+
+  it("should support ref/unref", () => {
+    const terminal = new Terminal();
+    terminal.ref();
+    terminal.unref();
+    terminal.close();
+  });
+
+  it("should call drain callback when write queue empties", async () => {
+    let drained = false;
+    const terminal = new Terminal({
+      drain() {
+        drained = true;
+      },
+    });
+
+    terminal.write("drain-test\n");
+    await new Promise((r) => setTimeout(r, 200));
+    expect(drained).toBe(true);
+    terminal.close();
+  });
+
+  it("should emit data via _emitData", () => {
+    const received: Uint8Array[] = [];
+    const terminal = new Terminal({
+      data(_t, chunk) {
+        received.push(chunk);
+      },
+    });
+
+    const testData = new Uint8Array([1, 2, 3]);
+    terminal._emitData(testData);
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual(testData);
+    terminal.close();
+  });
+
+  it("should close idempotently", () => {
+    const terminal = new Terminal();
+    terminal.close();
+    terminal.close(); // second close should not throw
+    expect(terminal.closed).toBe(true);
+  });
 });
 
 describe("spawn with terminal option", () => {

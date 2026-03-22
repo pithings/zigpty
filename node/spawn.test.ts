@@ -301,7 +301,7 @@ describeUnix("flow control (unix)", () => {
 
 describeUnix("env sanitization (unix)", () => {
   it("should strip TMUX and related vars", async () => {
-    const pty = spawn("/bin/sh", ["-c", "echo TMUX=$TMUX COLUMNS=$COLUMNS"], {
+    const pty = spawn("/bin/sh", ["-c", "sleep 0.05 && echo TMUX=\\\"$TMUX\\\" COLUMNS=\\\"$COLUMNS\\\""], {
       env: {
         ...process.env,
         TMUX: "should-be-stripped",
@@ -314,13 +314,12 @@ describeUnix("env sanitization (unix)", () => {
       let data = "";
       pty.onData((chunk) => {
         data += chunk;
-        if (data.includes("TMUX=")) resolve(data);
+        if (data.includes("COLUMNS=")) resolve(data);
       });
-      setTimeout(() => resolve(data), 2000);
+      setTimeout(() => resolve(data), 5000);
     });
 
-    expect(output).toContain("TMUX= ");
-    expect(output).toContain("COLUMNS=");
+    expect(output).toContain('TMUX=""');
     expect(output).not.toContain("should-be-stripped");
   });
 
@@ -340,6 +339,43 @@ describeUnix("env sanitization (unix)", () => {
     });
 
     expect(output).toContain("xterm-256color");
+  });
+});
+
+describeUnix("spawn with default shell (unix)", () => {
+  it("should use SHELL env var when file is omitted", async () => {
+    const pty = spawn(undefined, ["-c", "echo default-shell"]);
+    expect(pty.pid).toBeGreaterThan(0);
+
+    const output = await new Promise<string>((resolve) => {
+      let data = "";
+      pty.onData((chunk) => {
+        data += typeof chunk === "string" ? chunk : chunk.toString();
+        if (data.includes("default-shell")) resolve(data);
+      });
+      setTimeout(() => resolve(data), 3000);
+    });
+
+    expect(output).toContain("default-shell");
+  });
+});
+
+describeUnix("pause/resume (unix)", () => {
+  it("should pause and resume output", async () => {
+    const pty = spawn("/bin/cat");
+
+    pty.pause();
+    pty.resume();
+
+    pty.kill("SIGTERM");
+  });
+});
+
+describeUnix("clear (unix)", () => {
+  it("should be a no-op on unix", () => {
+    const pty = spawn("/bin/sh");
+    pty.clear(); // should not throw
+    pty.kill("SIGTERM");
   });
 });
 

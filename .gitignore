@@ -3,4 +3,5 @@ node_modules
 dist
 zig-out
 prebuilds
+coverage
 .zig-cache
