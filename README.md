@@ -239,7 +239,7 @@ bun test               # Run tests
 
 <p align="center">
   <a href="https://sponsors.pi0.io/">
-    <img src="https://sponsors.pi0.io/sponsors.svg?1">
+    <img src="https://sponsors.pi0.io/sponsors.svg?xyz">
   </a>
 </p>
 
