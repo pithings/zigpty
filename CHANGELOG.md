@@ -1,6 +1,21 @@
 # Changelog
 
 
+## v0.0.3
+
+
+### 🏡 Chore
+
+- Skip unix pty teests on window ([c13b8d8](https://github.com/pithings/zigpty/commit/c13b8d8))
+
+### ✅ Tests
+
+- Increase coverage ([0d67c2c](https://github.com/pithings/zigpty/commit/0d67c2c))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+
 ## v0.0.2
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.0.1...v0.0.2)
