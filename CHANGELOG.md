@@ -1,6 +1,35 @@
 # Changelog
 
 
+## v0.0.4
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.0.3...v0.0.4)
+
+### 🩹 Fixes
+
+- Various fixes ([433b4e1](https://github.com/pithings/zigpty/commit/433b4e1))
+- Various js fixes ([67576da](https://github.com/pithings/zigpty/commit/67576da))
+- Various fixes ([57bd1ef](https://github.com/pithings/zigpty/commit/57bd1ef))
+
+### 💅 Refactors
+
+- Move node to src/ ([cf3ea75](https://github.com/pithings/zigpty/commit/cf3ea75))
+- Update zig structure ([88dbe54](https://github.com/pithings/zigpty/commit/88dbe54))
+
+### 🏡 Chore
+
+- Update example ([b0db7be](https://github.com/pithings/zigpty/commit/b0db7be))
+- Update tests ([b3d77b1](https://github.com/pithings/zigpty/commit/b3d77b1))
+- Use vitest ([ca4e123](https://github.com/pithings/zigpty/commit/ca4e123))
+
+### 🤖 CI
+
+- Skip bun tests for now ([2ac0d14](https://github.com/pithings/zigpty/commit/2ac0d14))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+
 ## v0.0.3
 
 
