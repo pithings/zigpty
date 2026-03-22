@@ -103,7 +103,39 @@ interface IPty {
   pause(): void;
   resume(): void;
   close(): void;
+  waitFor(pattern: string, options?: { timeout?: number }): Promise<string>;
 }
+```
+
+### `pty.waitFor(pattern, options?)`
+
+Wait until the PTY output contains the given string. Returns all output collected so far. Useful for AI agents that need to read prompts before responding.
+
+```ts
+import { spawn, Terminal } from "zigpty";
+
+const output = [];
+
+await using terminal = new Terminal({
+  data: (_t, d) => output.push(new TextDecoder().decode(d)),
+});
+
+const pty = spawn("python3", ["-c", `
+name = input("What is your name? ")
+lang = input("Favorite language? ")
+print(f"Nice to meet you, {name}! {lang} is a great choice.")
+`], { terminal });
+
+// Agent waits for prompts and responds
+await pty.waitFor("name?");    pty.write("node agent\n");
+await pty.waitFor("language?"); pty.write("Zig\n");
+await pty.exited;
+
+console.log(output.join("").trim().split("\n").pop());
+// Nice to meet you, node agent! Zig is a great choice.
+```
+
+Options: `{ timeout?: number }` — default 30 seconds. Throws if the pattern is not found within the timeout.
 
 ### `open(options?)`
 

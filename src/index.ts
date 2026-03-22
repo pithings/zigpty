@@ -1,7 +1,7 @@
 import { isWindows, native, type INativeUnix, type INativeWindows } from "./napi.ts";
-import type { IOpenResult, IPty, IPtyOpenOptions, IPtyOptions } from "./types.ts";
-import { UnixTerminal } from "./unix.ts";
-import { WindowsTerminal } from "./windows.ts";
+import type { IOpenResult, IPty, IPtyOpenOptions, IPtyOptions } from "./pty/types.ts";
+import { UnixPty } from "./pty/unix.ts";
+import { WindowsPty } from "./pty/windows.ts";
 
 export type {
   IDisposable,
@@ -10,16 +10,16 @@ export type {
   IPty,
   IPtyOpenOptions,
   IPtyOptions,
-} from "./types.ts";
+} from "./pty/types.ts";
 
 export { Terminal, type TerminalOptions } from "./terminal.ts";
 
 export function spawn(file?: string, args: string[] = [], options?: IPtyOptions): IPty {
   const shell = file ?? defaultShell();
   if (isWindows) {
-    return new WindowsTerminal(native as INativeWindows, shell, args, options);
+    return new WindowsPty(native as INativeWindows, shell, args, options);
   }
-  return new UnixTerminal(shell, args, options);
+  return new UnixPty(shell, args, options);
 }
 
 function defaultShell(): string {

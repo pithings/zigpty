@@ -39,6 +39,8 @@ export class Terminal implements AsyncDisposable {
   private _onData?: (terminal: Terminal, data: Uint8Array) => void;
   private _onExit?: (terminal: Terminal, exitCode: number, signal: string | null) => void;
   private _onDrain?: (terminal: Terminal) => void;
+  /** @internal Listeners for waitFor support. */
+  _dataListeners: Array<(data: string) => void> = [];
 
   // Unix internals
   private _readable?: tty.ReadStream;
@@ -174,6 +176,12 @@ export class Terminal implements AsyncDisposable {
   /** @internal Emit data from native. */
   _emitData(data: Uint8Array): void {
     this._onData?.(this, data);
+    if (this._dataListeners.length > 0) {
+      const text = new TextDecoder().decode(data);
+      for (const listener of this._dataListeners) {
+        listener(text);
+      }
+    }
   }
 
   private _destroyReader(): void {
@@ -186,7 +194,7 @@ export class Terminal implements AsyncDisposable {
   private _setupUnixReader(fd: number): void {
     this._readable = new tty.ReadStream(fd);
     this._readable.on("data", (chunk: Buffer) => {
-      this._onData?.(this, new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+      this._emitData(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
     });
     this._readable.on("error", () => {});
   }

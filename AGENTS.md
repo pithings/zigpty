@@ -17,7 +17,7 @@ Zig-based PTY library. Dual-use: standalone **Zig package** and **Node.js NAPI a
 zigpty/
 ├── build.zig               # Zig build: exposes "zigpty" module + NAPI shared libs
 ├── build.zig.zon           # Zig package metadata (min Zig 0.15.1)
-├── build.config.ts         # obuild config (bundle node/ → dist/)
+├── build.config.ts         # obuild config (bundle src/ → dist/)
 ├── zig/                    # Zig sources (two layers)
 │   ├── lib.zig             # Pure Zig PTY library — platform dispatcher + shared code
 │   ├── root.zig            # NAPI module entry: exports platform-specific functions
@@ -25,22 +25,23 @@ zigpty/
 │   ├── pty.zig             # NAPI shared helpers + platform dispatch (re-exports)
 │   ├── pty_unix.zig        # NAPI↔lib.zig bridge for Unix (fork, open, resize, process)
 │   ├── termios.zig         # Default terminal config (Linux + macOS)
-│   ├── linux/
-│   │   └── pty.zig         # Linux-specific: execvpe, ptsname_r, /proc, close_range
-│   ├── darwin/
-│   │   └── pty.zig         # macOS-specific: execvp+environ, sysctl, FD close loop
+│   ├── pty_linux.zig       # Linux-specific: execvpe, ptsname_r, /proc, close_range
+│   ├── pty_darwin.zig      # macOS-specific: execvp+environ, sysctl, FD close loop
 │   └── windows/
 │       ├── pty.zig         # Windows-specific: ConPTY (CreatePseudoConsole + pipes)
 │       ├── napi.zig        # NAPI↔lib.zig bridge for Windows (spawn, write, resize, kill, close)
 │       └── node_api.def    # NAPI import definitions (→ .lib via zig dlltool)
-├── node/                   # TypeScript wrapper + tests
+├── src/                    # TypeScript wrapper + tests
 │   ├── index.ts            # Public API: spawn(), open() — platform dispatch
-│   ├── types.ts            # IPty, IPtyOptions, INativeUnix, INativeWindows interfaces
-│   ├── unix.ts             # UnixTerminal: tty.ReadStream + async fs.write
-│   ├── windows.ts          # WindowsTerminal: native callbacks + deferred init
+│   ├── napi.ts             # Native module loader (platform-aware, INativeUnix/INativeWindows)
 │   ├── terminal.ts         # Terminal class (Bun-compatible) + TerminalOptions type
-│   ├── napi.ts             # Native module loader (platform-aware)
-│   └── spawn.test.ts       # E2E tests (21 tests, platform-conditional)
+│   ├── pty/                # PTY class hierarchy
+│   │   ├── _base.ts        # BasePty abstract class — shared state, events, waitFor, buildEnvPairs
+│   │   ├── types.ts        # IPty, IPtyOptions, IDisposable, IEvent interfaces
+│   │   ├── unix.ts         # UnixPty: tty.ReadStream + async fs.write
+│   │   └── windows.ts      # WindowsPty: native callbacks + deferred init
+│   ├── spawn.test.ts       # E2E tests (platform-conditional)
+│   └── terminal.test.ts    # Terminal class tests
 ├── dist/                   # Built output (obuild → .mjs + .d.mts)
 ├── prebuilds/              # Zig build output (8 binaries, see below)
 ├── scripts/
@@ -49,11 +50,33 @@ zigpty/
     └── ci.yml              # PR/push: build + test (Linux, macOS, Windows)
 ```
 
+### TypeScript Class Hierarchy
+
+```
+IPty (interface, src/pty/types.ts)
+  └── BasePty (abstract, src/pty/_base.ts)
+        ├── UnixPty (src/pty/unix.ts)
+        └── WindowsPty (src/pty/windows.ts)
+
+Terminal (standalone, src/terminal.ts) — Bun-compatible callbacks, AsyncDisposable
+```
+
+**BasePty** contains shared logic:
+- State: `_dataListeners`, `_exitListeners`, `_closed`, `_exitCode`, `_exited` promise, `_terminal`
+- Event getters: `onData`, `onExit`, `exited`, `exitCode`
+- `waitFor(pattern, { timeout? })` — waits for string in output, hooks into both `onData` and Terminal data paths
+- `_handleExit(info)` — common exit callback (set closed, fire listeners, resolve promise)
+- `buildEnvPairs(env, termName?, sanitizeKeys?)` — shared env builder
+
+**UnixPty** adds: fd management, `tty.ReadStream`, async write queue with EAGAIN retry, flow control, `process` via native, signal-based `kill()`.
+
+**WindowsPty** adds: ConPTY handle, deferred calls until ready, `napi_threadsafe_function` data/exit callbacks.
+
 ### Zig Source Layers
 
 The Zig code is split into two layers:
 
-1. **Pure Zig library** (`lib.zig` + `linux/pty.zig` + `darwin/pty.zig` + `windows/pty.zig` + `termios.zig`) — No NAPI dependency. `lib.zig` dispatches to platform-specific modules via `builtin.os.tag`. Unix exposes `forkPty`, `openPty`, `resize`, `getProcessName`, `waitForExit`. Windows exposes `spawnConPty`, `readOutput`, `writeInput`, `resizeConsole`, `waitForExit`, `killProcess`, `closePty`. Can be imported by any Zig project via `@import("zigpty")`.
+1. **Pure Zig library** (`lib.zig` + `pty_linux.zig` + `pty_darwin.zig` + `windows/pty.zig` + `termios.zig`) — No NAPI dependency. `lib.zig` dispatches to platform-specific modules via `builtin.os.tag`. Unix exposes `forkPty`, `openPty`, `resize`, `getProcessName`, `waitForExit`. Windows exposes `spawnConPty`, `readOutput`, `writeInput`, `resizeConsole`, `waitForExit`, `killProcess`, `closePty`. Can be imported by any Zig project via `@import("zigpty")`.
 
 2. **NAPI wrapper** (`root.zig` + `pty.zig` + `pty_unix.zig` + `windows/napi.zig` + `napi.zig`) — Thin bridge that parses NAPI arguments and calls `lib.zig`. `pty.zig` contains shared helpers and re-exports platform-specific symbols. `pty_unix.zig` handles Unix (fork, open, resize, process). `windows/napi.zig` handles Windows ConPTY (spawn, write, resize, kill, close). Registers different exports on Windows vs Unix. Manages `napi_threadsafe_function` for exit monitoring and (on Windows) data streaming.
 
@@ -159,7 +182,7 @@ Windows uses `napi_external` to wrap the `WinConPtyContext` handle. Data flows f
 ```ts
 import { spawn } from "zigpty";
 
-// Works on all platforms — spawn() dispatches to UnixTerminal or WindowsTerminal
+// Works on all platforms — spawn() dispatches to UnixPty or WindowsPty
 const pty = spawn("/bin/bash", [], { cols: 120, rows: 40 });
 // Windows: spawn("cmd.exe", [], { cols: 120, rows: 40 })
 
@@ -170,6 +193,18 @@ pty.resize(80, 24);
 pty.kill("SIGTERM"); // Windows: kill() terminates the process
 ```
 
+### `waitFor(pattern, options?)`
+
+Wait for a specific string to appear in the PTY output. Useful for AI agents driving interactive programs.
+
+```ts
+const pty = spawn("python3", ["-c", `name = input("name? ")`]);
+await pty.waitFor("name?");  // resolves when output contains "name?"
+pty.write("zigpty\n");
+```
+
+Options: `{ timeout?: number }` (default: 30s). Throws on timeout.
+
 ### Terminal API (Bun-compatible)
 
 `spawn()` accepts optional `terminal: TerminalOptions | Terminal` in options for callback-based data (`Uint8Array`) and `Promise`-based exit (`pty.exited`). `IPty` now has `exited: Promise<number>` and `exitCode: number | null`. `Terminal` class (`terminal.ts`) can be standalone (`new Terminal()` opens bare PTY) or passed to `spawn()` (attaches to fork's fd on Unix, ConPTY handle on Windows). Supports `AsyncDisposable`.
@@ -177,9 +212,10 @@ pty.kill("SIGTERM"); // Windows: kill() terminates the process
 ## Key Design Decisions
 
 - **Two-layer architecture**: Pure Zig library (`lib.zig`) with thin NAPI wrapper. Enables Zig package use without Node.js dependency.
+- **BasePty abstract class**: Shared state management, event listeners, `waitFor`, and exit handling extracted into `_base.ts`. `UnixPty` and `WindowsPty` extend it with platform-specific logic only.
 - **Raw NAPI over tokota/zig-napi**: Zero dependency risk. `napi.zig` is ~240 lines of pure `extern` declarations.
 - **Pure extern declarations**: `forkpty`, `openpty`, `waitpid`, etc. declared as `extern fn` — no `@cImport` for platform-specific headers. NAPI and Windows kernel32 are also pure Zig externs.
-- **Platform dispatch via `builtin.os.tag`**: `lib.zig` imports `linux/pty.zig`, `darwin/pty.zig`, or `windows/pty.zig` at comptime. Unix and Windows APIs are conditionally compiled.
+- **Platform dispatch via `builtin.os.tag`**: `lib.zig` imports `pty_linux.zig`, `pty_darwin.zig`, or `windows/pty.zig` at comptime. Unix and Windows APIs are conditionally compiled.
 - **Signal blocking around fork** (Unix): Prevents race conditions (matches node-pty behavior).
 - **`close_range` syscall with `/proc/self/fd` fallback** (Linux): Direct syscall (not libc extern) to close leaked FDs — avoids musl symbol issues.
 - **FD close loop** (macOS): No `/proc/self/fd` or `close_range` — closes FDs 3..255.
@@ -189,7 +225,7 @@ pty.kill("SIGTERM"); // Windows: kill() terminates the process
 - **`STARTF_USESTDHANDLES` with null handles** (Windows): Critical for ConPTY — without this flag, the spawned process inherits the parent's real console handles and output bypasses the ConPTY pipe entirely. Setting the flag with null `hStdInput`/`hStdOutput`/`hStdError` forces the process to use the pseudo console for all I/O.
 - **Two-phase ConPTY startup** (Windows): `createConPty` creates pipes + pseudo console, then read thread starts draining the output pipe, then `startProcess` spawns the process. This ensures no output is lost for fast-exiting processes (matches node-pty's two-phase approach).
 - **Zig read thread for Windows**: Reads ConPTY output pipe in a background thread, forwards data to JS via `napi_threadsafe_function`. Avoids pipe-fd ↔ Node.js compatibility issues.
-- **Deferred calls on Windows**: `WindowsTerminal` buffers write/resize calls until first data is received (prevents ConPTY deadlock on startup).
+- **Deferred calls on Windows**: `WindowsPty` buffers write/resize calls until first data is received (prevents ConPTY deadlock on startup).
 - **No libc on Windows**: Windows builds don't link libc — uses `page_allocator` instead of `c_allocator`.
 - **NAPI import lib via dlltool** (Windows): `windows/node_api.def` lists NAPI symbols imported from `node.exe`. Build generates import `.lib` at build time via `zig dlltool` — no checked-in binaries.
 - **ConPTY flush on exit** (Windows): `ClosePseudoConsole` must be called after process exit to flush remaining output. Input pipe is closed first, then pseudo console, while read thread drains output concurrently to avoid deadlock.

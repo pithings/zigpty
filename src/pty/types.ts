@@ -1,4 +1,4 @@
-import type { Terminal, TerminalOptions } from "./terminal.ts";
+import type { Terminal, TerminalOptions } from "../terminal.ts";
 
 export interface IEvent<T> {
   (listener: (data: T) => void): IDisposable;
@@ -41,6 +41,8 @@ export interface IPty {
   resume(): void;
   /** Close the PTY, closing file descriptors and cleaning up resources. */
   close(): void;
+  /** Wait until the output contains the given string. Resolves with all output collected so far. */
+  waitFor(pattern: string, options?: { timeout?: number }): Promise<string>;
 }
 
 export interface IPtyOpenOptions {
