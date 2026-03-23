@@ -62,16 +62,41 @@ pub fn resetSignalHandlers() void {
     }
 }
 
-extern fn sysconf(name: c_int) c_long;
-
 pub fn closeExcessFds() void {
-    // macOS has no close_range or /proc/self/fd.
-    // Use sysconf(_SC_OPEN_MAX) to get the actual limit.
-    const SC_OPEN_MAX = 5; // _SC_OPEN_MAX on macOS
-    const max_fd = sysconf(SC_OPEN_MAX);
-    const limit: c_int = if (max_fd > 0) @intCast(max_fd) else 256;
-    var fd: c_int = 3;
-    while (fd < limit) : (fd += 1) {
-        _ = std.c.close(fd);
+    // Enumerate /dev/fd to close only open FDs, avoids ~1M close() syscalls via sysconf.
+    const dir_fd = std.c.open("/dev/fd", .{
+        .ACCMODE = .RDONLY,
+        .DIRECTORY = true,
+        .CLOEXEC = true,
+    });
+    if (dir_fd < 0) {
+        // Last resort: brute-force close FDs 3..255
+        var fd: c_int = 3;
+        while (fd < 256) : (fd += 1) {
+            _ = std.c.close(fd);
+        }
+        return;
+    }
+    defer _ = std.c.close(dir_fd);
+
+    var base: i64 = 0;
+    var buf: [1024]u8 align(@alignOf(std.c.dirent)) = undefined;
+    while (true) {
+        const nread = std.c.getdirentries(dir_fd, &buf, buf.len, &base);
+        if (nread <= 0) break;
+
+        var offset: usize = 0;
+        const end: usize = @intCast(nread);
+        while (offset < end) {
+            const d: *align(1) const std.c.dirent = @ptrCast(buf[offset..]);
+            const reclen: usize = d.reclen;
+            if (reclen == 0 or offset + reclen > end) break;
+            offset += reclen;
+
+            const fd_num = std.fmt.parseInt(c_int, d.name[0..d.namlen], 10) catch continue;
+            if (fd_num > 2 and fd_num != dir_fd) {
+                _ = std.c.close(fd_num);
+            }
+        }
     }
 }
