@@ -5,4 +5,5 @@ zig-out
 prebuilds
 coverage
 .zig-cache
+*.o
 playground*

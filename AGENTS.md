@@ -28,6 +28,7 @@ zigpty/
 │   ├── pty_linux.zig       # Linux-specific: execvpe, ptsname_r, /proc, close_range
 │   ├── pty_darwin.zig      # macOS-specific: execvp+environ, sysctl, FD close loop
 │   ├── pty_windows.zig     # Windows-specific: ConPTY (CreatePseudoConsole + pipes)
+│   ├── errno_shim.c        # Android errno compat (__errno_location → __errno)
 │   └── win/
 │       ├── napi.zig        # NAPI↔lib.zig bridge for Windows (spawn, write, resize, kill, close)
 │       └── node_api.def    # NAPI import definitions (→ .lib via zig dlltool)
@@ -39,8 +40,10 @@ zigpty/
 │   │   ├── _base.ts        # BasePty abstract class — shared state, events, waitFor, buildEnvPairs
 │   │   ├── types.ts        # IPty, IPtyOptions, IDisposable, IEvent interfaces
 │   │   ├── unix.ts         # UnixPty: tty.ReadStream + async fs.write
-│   │   └── windows.ts      # WindowsPty: native callbacks + deferred init
+│   │   ├── windows.ts      # WindowsPty: native callbacks + deferred init
+│   │   └── pipe.ts         # PipePty: pure-TS fallback when native bindings unavailable
 │   ├── spawn.test.ts       # E2E tests (platform-conditional)
+│   ├── pipe.test.ts        # PipePty fallback tests
 │   └── terminal.test.ts    # Terminal class tests
 ├── dist/                   # Built output (obuild → .mjs + .d.mts)
 ├── prebuilds/              # Zig build output (8 binaries, see below)
@@ -55,13 +58,15 @@ zigpty/
 ```
 IPty (interface, src/pty/types.ts)
   └── BasePty (abstract, src/pty/_base.ts)
-        ├── UnixPty (src/pty/unix.ts)
-        └── WindowsPty (src/pty/windows.ts)
+        ├── UnixPty (src/pty/unix.ts)       — native PTY via Zig NAPI
+        ├── WindowsPty (src/pty/windows.ts) — native ConPTY via Zig NAPI
+        └── PipePty (src/pty/pipe.ts)       — pure-TS fallback (child_process pipes)
 
 Terminal (standalone, src/terminal.ts) — Bun-compatible callbacks, AsyncDisposable
 ```
 
 **BasePty** contains shared logic:
+
 - State: `_dataListeners`, `_exitListeners`, `_closed`, `_exitCode`, `_exited` promise, `_terminal`
 - Event getters: `onData`, `onExit`, `exited`, `exitCode`
 - `waitFor(pattern, { timeout? })` — waits for string in output, hooks into both `onData` and Terminal data paths
@@ -71,6 +76,19 @@ Terminal (standalone, src/terminal.ts) — Bun-compatible callbacks, AsyncDispos
 **UnixPty** adds: fd management, `tty.ReadStream`, async write queue with EAGAIN retry, flow control, `process` via native, signal-based `kill()`.
 
 **WindowsPty** adds: ConPTY handle, deferred calls until ready, `napi_threadsafe_function` data/exit callbacks.
+
+**PipePty** (fallback, no native dependency): Spawns child via `child_process.spawn` with `stdio: ["pipe", "pipe", "pipe"]`. Emulates terminal behavior in userspace:
+
+- Signal character translation (`^C`→SIGINT, `^Z`→SIGTSTP, `^\`→SIGQUIT, `^D`→EOF)
+- Canonical mode with echo (line buffering, backspace, `^W` word erase, `^U` line kill, `^R` reprint)
+- Raw mode (`setRawMode()` / `setCanonicalMode()`) — disables echo and line buffering
+- XON/XOFF flow control interception when `handleFlowControl` is enabled
+- Force-color env hints (`FORCE_COLOR=1`, `COLORTERM=truecolor`) auto-set
+- `SIGWINCH` sent on `resize()` as best-effort hint
+- Foreground process tracking via `/proc/<pid>/stat` → `/proc/<pgrp>/cmdline` (Linux only)
+- Merges stdout + stderr into single data stream (matching real PTY behavior)
+
+**Native loading** (`napi.ts`): `loadNative()` returns `null` on failure instead of throwing. `hasNative` boolean exported for runtime detection. `spawn()` in `index.ts` routes to `PipePty` when `hasNative === false`.
 
 ### Zig Source Layers
 
@@ -112,13 +130,13 @@ bash scripts/cross-platform.sh
 | `zigpty.linux-x64.node`        | x64 glibc (Debian/Ubuntu/Fedora)     |
 | `zigpty.linux-x64-musl.node`   | x64 musl (Alpine)                    |
 | `zigpty.linux-arm64.node`      | arm64 glibc (Ubuntu on Graviton/RPi) |
-| `zigpty.linux-arm64-musl.node` | arm64 musl (Alpine arm64)            |
+| `zigpty.linux-arm64-musl.node` | arm64 musl (Alpine arm64 + Android)  |
 | `zigpty.darwin-arm64.node`     | macOS arm64 (Apple Silicon)          |
 | `zigpty.darwin-x64.node`       | macOS x64 (Intel)                    |
 | `zigpty.win32-x64.node`        | Windows x64                          |
 | `zigpty.win32-arm64.node`      | Windows arm64                        |
 
-The native loader (`napi.ts`) tries glibc first, falls back to musl on Linux. Musl builds use direct `linux.syscall3(.close_range, ...)` to avoid libc symbol dependencies. Windows builds don't link libc.
+The native loader (`napi.ts`) tries glibc first, falls back to musl on Linux. On Android (`platform() === "android"`), maps to `linux` and loads the musl binary. Musl builds include a weak errno shim for Android/Bionic compatibility. Musl builds use direct `linux.syscall3(.close_range, ...)` to avoid libc symbol dependencies. Windows builds don't link libc.
 
 ## Zig Package API
 
@@ -140,17 +158,17 @@ Types: `ForkOptions`, `ForkResult`, `OpenResult`, `ExitInfo`, `PtyError`, `Fd`, 
 
 Available via `lib.win` (re-exports `pty_windows.zig`):
 
-| Function         | Signature                                              | Description                          |
-| ---------------- | ------------------------------------------------------ | ------------------------------------ |
-| `createConPty`   | `(cols, rows) !ConPtySetup`                            | Phase 1: create pipes + pseudo console |
-| `startProcess`   | `(hpc, cmd_line, env_block, cwd) !{process, pid}`     | Phase 2: spawn process in ConPTY     |
-| `spawnConPty`    | `(cmd_line, env_block, cwd, cols, rows) !SpawnResult`  | Convenience: createConPty + startProcess |
-| `readOutput`     | `(conout, buf) usize`                                  | Read from output pipe (blocking)     |
-| `writeInput`     | `(conin, data) !void`                                  | Write to input pipe                  |
-| `resizeConsole`  | `(hpc, cols, rows) !void`                              | Resize pseudo console                |
-| `waitForExit`    | `(process) ExitInfo`                                   | Wait for process exit (blocking)     |
-| `killProcess`    | `(process, exit_code) void`                             | Terminate process                    |
-| `closePty`       | `(result) void`                                         | Close all ConPTY handles             |
+| Function        | Signature                                             | Description                              |
+| --------------- | ----------------------------------------------------- | ---------------------------------------- |
+| `createConPty`  | `(cols, rows) !ConPtySetup`                           | Phase 1: create pipes + pseudo console   |
+| `startProcess`  | `(hpc, cmd_line, env_block, cwd) !{process, pid}`     | Phase 2: spawn process in ConPTY         |
+| `spawnConPty`   | `(cmd_line, env_block, cwd, cols, rows) !SpawnResult` | Convenience: createConPty + startProcess |
+| `readOutput`    | `(conout, buf) usize`                                 | Read from output pipe (blocking)         |
+| `writeInput`    | `(conin, data) !void`                                 | Write to input pipe                      |
+| `resizeConsole` | `(hpc, cols, rows) !void`                             | Resize pseudo console                    |
+| `waitForExit`   | `(process) ExitInfo`                                  | Wait for process exit (blocking)         |
+| `killProcess`   | `(process, exit_code) void`                           | Terminate process                        |
+| `closePty`      | `(result) void`                                       | Close all ConPTY handles                 |
 
 Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `ConPtyError`, `HPCON`, `HANDLE`
 
@@ -167,13 +185,13 @@ Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `ConPtyError`, `HPCON`, `HANDLE
 
 ### Windows Exports
 
-| Export    | Signature                                                                      | Implementation                                           |
-| --------- | ------------------------------------------------------------------------------ | -------------------------------------------------------- |
-| `spawn`   | `(file, args[], env[], cwd, cols, rows, onData, onExit)` → `{pid, handle}`    | `win.spawnConPty()` + read thread + exit thread          |
-| `write`   | `(handle, data)` → void                                                        | `win.writeInput()`                                        |
-| `resize`  | `(handle, cols, rows)` → void                                                  | `win.resizeConsole()`                                     |
-| `kill`    | `(handle)` → void                                                               | `win.killProcess()`                                       |
-| `close`   | `(handle)` → void                                                               | `win.closePty()`                                          |
+| Export   | Signature                                                                  | Implementation                                  |
+| -------- | -------------------------------------------------------------------------- | ----------------------------------------------- |
+| `spawn`  | `(file, args[], env[], cwd, cols, rows, onData, onExit)` → `{pid, handle}` | `win.spawnConPty()` + read thread + exit thread |
+| `write`  | `(handle, data)` → void                                                    | `win.writeInput()`                              |
+| `resize` | `(handle, cols, rows)` → void                                              | `win.resizeConsole()`                           |
+| `kill`   | `(handle)` → void                                                          | `win.killProcess()`                             |
+| `close`  | `(handle)` → void                                                          | `win.closePty()`                                |
 
 Windows uses `napi_external` to wrap the `WinConPtyContext` handle. Data flows from a Zig read thread to JS via `napi_threadsafe_function` (onData callback).
 
@@ -199,7 +217,7 @@ Wait for a specific string to appear in the PTY output. Useful for AI agents dri
 
 ```ts
 const pty = spawn("python3", ["-c", `name = input("name? ")`]);
-await pty.waitFor("name?");  // resolves when output contains "name?"
+await pty.waitFor("name?"); // resolves when output contains "name?"
 pty.write("zigpty\n");
 ```
 
@@ -211,6 +229,8 @@ Options: `{ timeout?: number }` (default: 30s). Throws on timeout.
 
 ## Key Design Decisions
 
+- **Graceful fallback**: `loadNative()` returns `null` instead of throwing when native bindings can't load. `spawn()` auto-routes to `PipePty` (pure TypeScript, `child_process.spawn` with pipes). This prevents hard crashes in containers, sandboxes, CI without prebuilds, or WASM runtimes. `open()` throws a clear error in fallback mode since bare PTY pairs require kernel support.
+- **Userspace line discipline in PipePty**: Canonical mode buffers input line-by-line with echo, backspace, `^W`/`^U`/`^R` handling. Raw mode (`setRawMode()`) passes bytes through directly. Signal chars (`^C`/`^Z`/`^\`/`^D`) are intercepted in the write path and translated to OS signals / EOF regardless of mode.
 - **Two-layer architecture**: Pure Zig library (`lib.zig`) with thin NAPI wrapper. Enables Zig package use without Node.js dependency.
 - **BasePty abstract class**: Shared state management, event listeners, `waitFor`, and exit handling extracted into `_base.ts`. `UnixPty` and `WindowsPty` extend it with platform-specific logic only.
 - **Raw NAPI over tokota/zig-napi**: Zero dependency risk. `napi.zig` is ~240 lines of pure `extern` declarations.
@@ -231,7 +251,8 @@ Options: `{ timeout?: number }` (default: 30s). Throws on timeout.
 - **ConPTY flush on exit** (Windows): `ClosePseudoConsole` must be called after process exit to flush remaining output. Input pipe is closed first, then pseudo console, while read thread drains output concurrently to avoid deadlock.
 - **`tty.ReadStream`** for reading PTY output on Unix (not `net.Socket` — PTY fds are TTY type).
 - **Async `fs.write`** with EAGAIN retry for writing on Unix (non-blocking write queue with `setImmediate` backoff).
-- **Platform-aware native loading**: `napi.ts` resolves `zigpty.<os>-<arch>.node` with glibc→musl fallback on Linux.
+- **Android errno shim** (`zig/errno_shim.c`): Android's Bionic libc uses `__errno()` instead of musl's `__errno_location()`. All musl builds link a tiny C shim with weak symbols — `__errno_location` (weak defined) forwards to `__errno` (weak undefined). On musl Linux, musl's strong `__errno_location` overrides the shim. On Android/Bionic, the shim activates and `__errno` resolves from Bionic's libc. No separate Android binary needed.
+- **Platform-aware native loading**: `napi.ts` resolves `zigpty.<os>-<arch>.node` with glibc→musl fallback on Linux. On Android (`platform() === "android"`), maps to `linux` and loads the musl binary.
 - **`ptsname_r`/`ttyname_r`** in lib.zig (thread-safe) vs `ptsname`/`ttyname` in old pty.zig.
 
 ## Windows ConPTY Pitfalls
@@ -259,6 +280,7 @@ Critical lessons learned from debugging the Windows ConPTY implementation. These
 ### ConPTY exit cleanup order matters
 
 **Correct order** after `waitForExit` returns:
+
 1. Close input pipe (`closeConin`) — no more input after process exit
 2. Call `ClosePseudoConsole` — flushes remaining VT output, closes output pipe write end
 3. Join read thread — it gets EOF from step 2 and exits
@@ -273,11 +295,11 @@ The inner pipe handles (`pipe_in_read`, `pipe_out_write`) passed to `CreatePseud
 
 ### Differences from node-pty's architecture
 
-| Aspect | node-pty | zigpty |
-|--------|----------|--------|
-| Pipe type | Named pipes (128KB buffers) | Anonymous pipes (default ~4KB) |
-| Output reading | Worker thread → IPC → Socket → JS | Zig read thread → `napi_threadsafe_function` → JS |
-| Process spawn | Two-phase: `startProcess` (create ConPTY) → `connect` (ConnectNamedPipe + CreateProcessW) | Two-phase: `createConPty` → `startProcess` (CreateProcessW) |
-| Exit handling | Never calls `ClosePseudoConsole` on normal exit; 1000ms flush timer then socket close | Calls `ClosePseudoConsole` from exit monitor thread after process exit |
-| Kill handling | `ClosePseudoConsole` + `TerminateProcess` (via `PtyKill`) | `TerminateProcess` from JS; `ClosePseudoConsole` from exit monitor |
-| Native bindings | C++ with node-addon-api | Pure Zig raw NAPI externs (~240 lines) |
+| Aspect          | node-pty                                                                                  | zigpty                                                                 |
+| --------------- | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Pipe type       | Named pipes (128KB buffers)                                                               | Anonymous pipes (default ~4KB)                                         |
+| Output reading  | Worker thread → IPC → Socket → JS                                                         | Zig read thread → `napi_threadsafe_function` → JS                      |
+| Process spawn   | Two-phase: `startProcess` (create ConPTY) → `connect` (ConnectNamedPipe + CreateProcessW) | Two-phase: `createConPty` → `startProcess` (CreateProcessW)            |
+| Exit handling   | Never calls `ClosePseudoConsole` on normal exit; 1000ms flush timer then socket close     | Calls `ClosePseudoConsole` from exit monitor thread after process exit |
+| Kill handling   | `ClosePseudoConsole` + `TerminateProcess` (via `PtyKill`)                                 | `TerminateProcess` from JS; `ClosePseudoConsole` from exit monitor     |
+| Native bindings | C++ with node-addon-api                                                                   | Pure Zig raw NAPI externs (~240 lines)                                 |

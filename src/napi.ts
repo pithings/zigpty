@@ -48,7 +48,7 @@ export type INative = INativeUnix | INativeWindows;
 
 const isWindows = platform() === "win32";
 
-// Android uses Linux kernel — musl-static binaries work on both
+// Android uses Linux kernel — musl builds include Bionic errno shim
 const osPlatform = platform() === "android" ? "linux" : platform();
 
 function loadNative(): INative | null {
@@ -62,7 +62,7 @@ function loadNative(): INative | null {
       return require(resolve(base)) as INativeWindows;
     }
 
-    // Try glibc build first, fall back to musl (for Alpine/musl-based distros)
+    // Try glibc build first, fall back to musl (for Alpine/musl-based distros and Android)
     try {
       return require(resolve(base)) as INativeUnix;
     } catch {}

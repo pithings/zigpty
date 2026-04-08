@@ -55,6 +55,7 @@ pub fn build(b: *std.Build) void {
 
 fn addTarget(b: *std.Build, clean: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     const is_windows = target.result.os.tag == .windows;
+    const is_musl = target.result.abi == .musl or target.result.abi == .musleabi;
 
     const mod = b.createModule(.{
         .root_source_file = b.path("zig/root.zig"),
@@ -63,8 +64,14 @@ fn addTarget(b: *std.Build, clean: *std.Build.Step, target: std.Build.ResolvedTa
         .link_libc = !is_windows,
     });
 
-    // Link libutil for forkpty/openpty (glibc needs it, musl has it in libc)
-    if (target.result.os.tag == .linux and target.result.abi != .musl and target.result.abi != .musleabi) {
+    // Musl builds: add errno shim for Android/Bionic compat
+    // (weak symbols — overridden by musl's libc.so on real Linux, active on Android)
+    if (is_musl) {
+        mod.addCSourceFile(.{ .file = b.path("zig/errno_shim.c") });
+    }
+
+    // Link libutil for forkpty/openpty (glibc needs it; musl has it in libc)
+    if (target.result.os.tag == .linux and !is_musl) {
         mod.linkSystemLibrary("util", .{});
     }
 

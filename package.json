@@ -20,7 +20,6 @@
     "test:bun": "zig build test && bun test",
     "release": "bun run build && changelogen --release --push --publish"
   },
-  "packageManager": "bun@1.3.10",
   "devDependencies": {
     "@types/bun": "^1.3.11",
     "@types/node": "^25.5.0",
@@ -29,5 +28,6 @@
     "oxfmt": "^0.41.0",
     "typescript": "^5.9.3",
     "vitest": "^3.1.4"
-  }
+  },
+  "packageManager": "bun@1.3.10"
 }

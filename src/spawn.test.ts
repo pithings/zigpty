@@ -134,7 +134,12 @@ describeUnix("process name (unix)", () => {
     await new Promise((r) => setTimeout(r, 200));
 
     const processName = pty.process;
-    expect(processName).toBe("bash");
+    // Under QEMU emulation, /proc reports "qemu-aarch64-static" instead of the actual process
+    if (process.env.ZIGPTY_QEMU) {
+      expect(processName).toBe("qemu-aarch64-static");
+    } else {
+      expect(processName).toBe("bash");
+    }
 
     pty.kill("SIGTERM");
   });
