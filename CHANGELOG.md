@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.0.7
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.0.6...v0.0.7)
+
+### 🚀 Enhancements
+
+- Support pipe fallback ([c773fdd](https://github.com/pithings/zigpty/commit/c773fdd))
+- Add Android/Bionic errno compatibility shim ([d17de76](https://github.com/pithings/zigpty/commit/d17de76))
+- **pipe:** Auto-detect interactive shells and enable `-i` mode ([b5893ae](https://github.com/pithings/zigpty/commit/b5893ae))
+
+### 🩹 Fixes
+
+- Pipepty improvements ([ab7bfa1](https://github.com/pithings/zigpty/commit/ab7bfa1))
+- **test:** Make pipe tests robust on CI ([adc25f0](https://github.com/pithings/zigpty/commit/adc25f0))
+
+### ✅ Tests
+
+- Increase timeout ([f4931e0](https://github.com/pithings/zigpty/commit/f4931e0))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+
 ## v0.0.6
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.0.5...v0.0.6)
