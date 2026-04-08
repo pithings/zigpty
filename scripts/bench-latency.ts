@@ -15,7 +15,8 @@ async function main(): Promise<void> {
   }
 
   const iterationsArg = Number.parseInt(process.argv[2] ?? "", 10);
-  const iterations = Number.isFinite(iterationsArg) && iterationsArg > 0 ? iterationsArg : DEFAULT_ITERATIONS;
+  const iterations =
+    Number.isFinite(iterationsArg) && iterationsArg > 0 ? iterationsArg : DEFAULT_ITERATIONS;
   const timeoutArg = Number.parseInt(process.argv[3] ?? "", 10);
   const timeoutMs = Number.isFinite(timeoutArg) && timeoutArg > 0 ? timeoutArg : DEFAULT_TIMEOUT_MS;
 
@@ -26,8 +27,8 @@ async function main(): Promise<void> {
     results.push(result);
     console.log(
       `iter ${String(i + 1).padStart(2, "0")}/${iterations}: ` +
-      `spawn->first=${result.spawnToFirstMs.toFixed(3)}ms ` +
-      `roundtrip=${result.roundTripMs.toFixed(3)}ms`,
+        `spawn->first=${result.spawnToFirstMs.toFixed(3)}ms ` +
+        `roundtrip=${result.roundTripMs.toFixed(3)}ms`,
     );
   }
 
@@ -46,7 +47,10 @@ async function runIteration(iteration: number, timeoutMs: number): Promise<Itera
   const echoMarker = `__zigpty_echo_${nonce}__`;
 
   const tSpawn = performance.now();
-  const pty = spawn("/bin/sh", ["-c", `printf '${readyMarker}\\n'; exec cat`], { cols: 80, rows: 24 });
+  const pty = spawn("/bin/sh", ["-c", `printf '${readyMarker}\\n'; exec cat`], {
+    cols: 80,
+    rows: 24,
+  });
 
   let firstChunkAt: number | null = null;
   let output = "";
@@ -144,10 +148,13 @@ function percentile(sortedValues: number[], p: number): number {
   return sortedValues[index]!;
 }
 
-function printMetrics(label: string, metrics: { min: number; max: number; avg: number; p95: number }): void {
+function printMetrics(
+  label: string,
+  metrics: { min: number; max: number; avg: number; p95: number },
+): void {
   console.log(
     `${label}: min=${metrics.min.toFixed(3)} avg=${metrics.avg.toFixed(3)} ` +
-    `max=${metrics.max.toFixed(3)} p95=${metrics.p95.toFixed(3)} ms`,
+      `max=${metrics.max.toFixed(3)} p95=${metrics.p95.toFixed(3)} ms`,
   );
 }
 

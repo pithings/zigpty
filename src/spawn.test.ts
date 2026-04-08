@@ -96,7 +96,8 @@ describe("spawn", () => {
       let data = "";
       pty.onData((chunk) => {
         data += chunk;
-        if (data.includes(tmpDir) || data.includes("/tmp") || data.includes("/private/tmp")) resolve(data);
+        if (data.includes(tmpDir) || data.includes("/tmp") || data.includes("/private/tmp"))
+          resolve(data);
       });
       setTimeout(() => resolve(data), 5000);
     });
@@ -320,14 +321,18 @@ describeUnix("flow control (unix)", () => {
 
 describeUnix("env sanitization (unix)", () => {
   it("should strip TMUX and related vars", async () => {
-    const pty = spawn("/bin/sh", ["-c", "sleep 0.05 && echo TMUX=\\\"$TMUX\\\" COLUMNS=\\\"$COLUMNS\\\""], {
-      env: {
-        ...process.env,
-        TMUX: "should-be-stripped",
-        COLUMNS: "should-be-stripped",
-        PATH: process.env.PATH!,
-      } as Record<string, string>,
-    });
+    const pty = spawn(
+      "/bin/sh",
+      ["-c", 'sleep 0.05 && echo TMUX=\\"$TMUX\\" COLUMNS=\\"$COLUMNS\\"'],
+      {
+        env: {
+          ...process.env,
+          TMUX: "should-be-stripped",
+          COLUMNS: "should-be-stripped",
+          PATH: process.env.PATH!,
+        } as Record<string, string>,
+      },
+    );
 
     const output = await new Promise<string>((resolve) => {
       let data = "";

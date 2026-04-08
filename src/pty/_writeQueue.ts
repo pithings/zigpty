@@ -15,9 +15,8 @@ export class WriteQueue {
 
   enqueue(data: string | Uint8Array, encoding?: BufferEncoding | null): number {
     if (this._closed || this._fd < 0) return 0;
-    const buf = typeof data === "string"
-      ? Buffer.from(data, encoding || "utf8")
-      : Buffer.from(data);
+    const buf =
+      typeof data === "string" ? Buffer.from(data, encoding || "utf8") : Buffer.from(data);
     this._queue.push({ buffer: buf, offset: 0 });
     this._process();
     return buf.length;

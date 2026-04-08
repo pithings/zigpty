@@ -1,6 +1,5 @@
 # Changelog
 
-
 ## v0.0.6
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.0.5...v0.0.6)
@@ -56,7 +55,6 @@
 
 ## v0.0.3
 
-
 ### 🏡 Chore
 
 - Skip unix pty teests on window ([c13b8d8](https://github.com/pithings/zigpty/commit/c13b8d8))
@@ -83,7 +81,6 @@
 
 ## v0.0.1
 
-
 ### 🚀 Enhancements
 
 - Add macOS support ([e4c3a18](https://github.com/pithings/zigpty/commit/e4c3a18))
@@ -98,4 +95,3 @@
 ### ❤️ Contributors
 
 - Pooya Parsa ([@pi0](https://github.com/pi0))
-

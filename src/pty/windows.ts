@@ -23,32 +23,41 @@ export class WindowsPty extends BasePty {
     const envObj = options?.env ?? process.env;
     const envPairs = buildEnvPairs(envObj, options?.name);
 
-    const result = native.spawn(file, args, envPairs, cwd, cols, rows, (data: Buffer) => {
-      // First data received — ConPTY is ready, flush deferred calls
-      if (!this._ready) {
-        this._ready = true;
-        if (this._closed) return;
-        if (this._terminal) {
-          this._terminal._markReady();
+    const result = native.spawn(
+      file,
+      args,
+      envPairs,
+      cwd,
+      cols,
+      rows,
+      (data: Buffer) => {
+        // First data received — ConPTY is ready, flush deferred calls
+        if (!this._ready) {
+          this._ready = true;
+          if (this._closed) return;
+          if (this._terminal) {
+            this._terminal._markReady();
+          }
+          const deferred = [...this._deferredCalls];
+          this._deferredCalls.length = 0;
+          for (const fn of deferred) fn();
         }
-        const deferred = [...this._deferredCalls];
-        this._deferredCalls.length = 0;
-        for (const fn of deferred) fn();
-      }
-      if (this._closed) return;
+        if (this._closed) return;
 
-      // Emit to terminal callbacks
-      if (this._terminal) {
-        this._terminal._emitData(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
-      }
+        // Emit to terminal callbacks
+        if (this._terminal) {
+          this._terminal._emitData(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        }
 
-      const output = this._encoding ? data.toString(this._encoding) : data;
-      for (const listener of this._dataListeners) {
-        listener(output);
-      }
-    }, (info) => {
-      this._handleExit(info);
-    });
+        const output = this._encoding ? data.toString(this._encoding) : data;
+        for (const listener of this._dataListeners) {
+          listener(output);
+        }
+      },
+      (info) => {
+        this._handleExit(info);
+      },
+    );
 
     this.pid = result.pid;
     this._handle = result.handle;

@@ -13,7 +13,16 @@ import { WriteQueue } from "./_writeQueue.ts";
 const DEFAULT_FLOW_PAUSE = "\x13"; // XOFF
 const DEFAULT_FLOW_RESUME = "\x11"; // XON
 
-const UNIX_SANITIZE_KEYS = ["TMUX", "TMUX_PANE", "STY", "WINDOW", "WINDOWID", "TERMCAP", "COLUMNS", "LINES"];
+const UNIX_SANITIZE_KEYS = [
+  "TMUX",
+  "TMUX_PANE",
+  "STY",
+  "WINDOW",
+  "WINDOWID",
+  "TERMCAP",
+  "COLUMNS",
+  "LINES",
+];
 
 export class UnixPty extends BasePty {
   private _fd: number;

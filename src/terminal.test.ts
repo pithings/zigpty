@@ -123,7 +123,9 @@ describe("Terminal", () => {
 
 describe("spawn with terminal option", () => {
   it("should receive data via terminal callback", async () => {
-    const cmd = isWindows ? ["/c", "echo hello terminal"] : ["-c", "sleep 0.05 && echo hello terminal"];
+    const cmd = isWindows
+      ? ["/c", "echo hello terminal"]
+      : ["-c", "sleep 0.05 && echo hello terminal"];
 
     const output = await new Promise<string>((resolve) => {
       let data = "";

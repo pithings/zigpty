@@ -145,7 +145,11 @@ export abstract class BasePty implements IPty {
   abstract close(): void;
 }
 
-export function buildEnvPairs(env: Record<string, string | undefined>, termName?: string, sanitizeKeys?: string[]): string[] {
+export function buildEnvPairs(
+  env: Record<string, string | undefined>,
+  termName?: string,
+  sanitizeKeys?: string[],
+): string[] {
   const pairs: string[] = [];
   const envCopy = { ...env };
 
