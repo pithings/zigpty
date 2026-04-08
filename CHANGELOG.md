@@ -1,6 +1,18 @@
 # Changelog
 
 
+## v0.0.6
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.0.5...v0.0.6)
+
+### 🔥 Performance
+
+- Fix macOS spawn latency (~120ms → ~12ms) ([#1](https://github.com/pithings/zigpty/pull/1))
+
+### ❤️ Contributors
+
+- Nico Bailon <nico.bailon@gmail.com>
+
 ## v0.0.5
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.0.4...v0.0.5)
