@@ -6,6 +6,20 @@ const isWindows = platform() === "win32";
 const shell = isWindows ? "cmd.exe" : "/bin/sh";
 const describeUnix = isWindows ? describe.skip : describe;
 
+/** Collect all output from a short-lived PipePty until it exits. */
+function collectOutput(pty: PipePty): Promise<string> {
+  return new Promise<string>((resolve) => {
+    let data = "";
+    pty.onData((chunk) => {
+      data += chunk;
+    });
+    pty.onExit(() => {
+      // Give one tick for any remaining pipe data to flush
+      setTimeout(() => resolve(data), 50);
+    });
+  });
+}
+
 describe("PipePty: basic spawn", () => {
   it("should spawn a process and receive output", async () => {
     const cmd = isWindows ? ["/c", "echo hello pipe"] : ["-c", "echo hello pipe"];
@@ -15,15 +29,7 @@ describe("PipePty: basic spawn", () => {
     expect(pty.cols).toBe(80);
     expect(pty.rows).toBe(24);
 
-    const output = await new Promise<string>((resolve) => {
-      let data = "";
-      pty.onData((chunk) => {
-        data += chunk;
-        if (data.includes("hello pipe")) resolve(data);
-      });
-      setTimeout(() => resolve(data), 5000);
-    });
-
+    const output = await collectOutput(pty);
     expect(output).toContain("hello pipe");
   });
 
@@ -33,7 +39,6 @@ describe("PipePty: basic spawn", () => {
 
     const exitInfo = await new Promise<{ exitCode: number; signal: number }>((resolve) => {
       pty.onExit(resolve);
-      setTimeout(() => resolve({ exitCode: -1, signal: -1 }), 5000);
     });
 
     expect(exitInfo.exitCode).toBe(42);
@@ -60,16 +65,8 @@ describe("PipePty: basic spawn", () => {
     const cmd = isWindows ? ["/c", "cd"] : ["-c", "pwd"];
     const pty = new PipePty(shell, cmd, { cwd: tmpDir });
 
-    const output = await new Promise<string>((resolve) => {
-      let data = "";
-      pty.onData((chunk) => {
-        data += chunk;
-        if (data.includes("tmp") || data.includes("Temp")) resolve(data);
-      });
-      setTimeout(() => resolve(data), 5000);
-    });
-
-    expect(output.toLowerCase()).toContain("tmp");
+    const output = await collectOutput(pty);
+    expect(output.toLowerCase()).toMatch(/te?mp/);
   });
 });
 
@@ -80,15 +77,7 @@ describe("PipePty: env", () => {
       env: { ...process.env, PIPE_TEST: "works" } as Record<string, string>,
     });
 
-    const output = await new Promise<string>((resolve) => {
-      let data = "";
-      pty.onData((chunk) => {
-        data += chunk;
-        if (data.includes("works")) resolve(data);
-      });
-      setTimeout(() => resolve(data), 5000);
-    });
-
+    const output = await collectOutput(pty);
     expect(output).toContain("works");
   });
 
@@ -100,15 +89,7 @@ describe("PipePty: env", () => {
       env: { PATH: process.env.PATH! },
     });
 
-    const output = await new Promise<string>((resolve) => {
-      let data = "";
-      pty.onData((chunk) => {
-        data += chunk;
-        if (data.includes("1") && data.includes("truecolor")) resolve(data);
-      });
-      setTimeout(() => resolve(data), 5000);
-    });
-
+    const output = await collectOutput(pty);
     expect(output).toContain("1");
     expect(output).toContain("truecolor");
   });
@@ -119,19 +100,11 @@ describe("PipePty: env", () => {
       env: { PATH: process.env.PATH!, FORCE_COLOR: "0" },
     });
 
-    const output = await new Promise<string>((resolve) => {
-      let data = "";
-      pty.onData((chunk) => {
-        data += chunk;
-        if (data.includes("0")) resolve(data);
-      });
-      setTimeout(() => resolve(data), 5000);
-    });
-
+    const output = await collectOutput(pty);
     expect(output).toContain("0");
   });
 
-  it("should set COLUMNS and LINES from dimensions", async () => {
+  it.skipIf(isWindows)("should set COLUMNS and LINES from dimensions", async () => {
     const cmd = ["-c", "echo $COLUMNS $LINES"];
     const pty = new PipePty("/bin/sh", cmd, {
       cols: 132,
@@ -139,15 +112,7 @@ describe("PipePty: env", () => {
       env: { PATH: process.env.PATH! },
     });
 
-    const output = await new Promise<string>((resolve) => {
-      let data = "";
-      pty.onData((chunk) => {
-        data += chunk;
-        if (data.includes("132") && data.includes("50")) resolve(data);
-      });
-      setTimeout(() => resolve(data), 5000);
-    });
-
+    const output = await collectOutput(pty);
     expect(output).toContain("132");
     expect(output).toContain("50");
   });
@@ -162,7 +127,6 @@ describeUnix("PipePty: signal character translation", () => {
     const exitInfo = await new Promise<{ exitCode: number; signal: number }>((resolve) => {
       pty.onExit(resolve);
       setTimeout(() => pty.write("\x03"), 100); // ^C
-      setTimeout(() => resolve({ exitCode: -999, signal: -999 }), 5000);
     });
 
     // SIGINT = signal 2
@@ -177,7 +141,6 @@ describeUnix("PipePty: signal character translation", () => {
     const exitInfo = await new Promise<{ exitCode: number; signal: number }>((resolve) => {
       pty.onExit(resolve);
       setTimeout(() => pty.write("\x04"), 100); // ^D
-      setTimeout(() => resolve({ exitCode: -999, signal: -999 }), 5000);
     });
 
     expect(exitInfo.exitCode).toBe(0);
@@ -190,7 +153,6 @@ describeUnix("PipePty: signal character translation", () => {
     const exitInfo = await new Promise<{ exitCode: number; signal: number }>((resolve) => {
       pty.onExit(resolve);
       setTimeout(() => pty.write("\x1c"), 100); // ^\
-      setTimeout(() => resolve({ exitCode: -999, signal: -999 }), 5000);
     });
 
     // SIGQUIT = signal 3
@@ -439,7 +401,6 @@ describe("PipePty: close", () => {
     const exitInfo = await new Promise<{ exitCode: number; signal: number }>((resolve) => {
       pty.onExit(resolve);
       setTimeout(() => pty.close(), 100);
-      setTimeout(() => resolve({ exitCode: -999, signal: -999 }), 5000);
     });
 
     expect(exitInfo.exitCode).not.toBe(-999);
@@ -453,7 +414,6 @@ describeUnix("PipePty: kill", () => {
     const exitInfo = await new Promise<{ exitCode: number; signal: number }>((resolve) => {
       pty.onExit(resolve);
       setTimeout(() => pty.kill(), 100);
-      setTimeout(() => resolve({ exitCode: -999, signal: -999 }), 5000);
     });
 
     expect(exitInfo.signal).toBe(1); // SIGHUP
@@ -465,7 +425,6 @@ describeUnix("PipePty: kill", () => {
     const exitInfo = await new Promise<{ exitCode: number; signal: number }>((resolve) => {
       pty.onExit(resolve);
       setTimeout(() => pty.kill("SIGTERM"), 100);
-      setTimeout(() => resolve({ exitCode: -999, signal: -999 }), 5000);
     });
 
     expect(exitInfo.signal).toBe(15); // SIGTERM
@@ -492,10 +451,14 @@ describeUnix("PipePty: encoding", () => {
       pty.onData((data) => {
         if (Buffer.isBuffer(data)) {
           chunks.push(data);
-          if (Buffer.concat(chunks).toString().includes("raw")) resolve(Buffer.concat(chunks));
         }
       });
-      setTimeout(() => resolve(chunks.length > 0 ? Buffer.concat(chunks) : "timeout"), 5000);
+      pty.onExit(() => {
+        setTimeout(
+          () => resolve(chunks.length > 0 ? Buffer.concat(chunks) : Buffer.from("")),
+          50,
+        );
+      });
     });
 
     expect(Buffer.isBuffer(output)).toBe(true);
@@ -505,15 +468,7 @@ describeUnix("PipePty: encoding", () => {
   it("should return strings with default utf8 encoding", async () => {
     const pty = new PipePty("/bin/sh", ["-c", "echo text"]);
 
-    const output = await new Promise<string | Buffer>((resolve) => {
-      let data = "";
-      pty.onData((chunk) => {
-        data += chunk;
-        if (data.includes("text")) resolve(data);
-      });
-      setTimeout(() => resolve(data), 5000);
-    });
-
+    const output = await collectOutput(pty);
     expect(typeof output).toBe("string");
     expect(output).toContain("text");
   });
@@ -560,15 +515,7 @@ describeUnix("PipePty: stderr merging", () => {
   it("should merge stderr into the data stream", async () => {
     const pty = new PipePty("/bin/sh", ["-c", "echo stdout && echo stderr >&2"]);
 
-    const output = await new Promise<string>((resolve) => {
-      let data = "";
-      pty.onData((chunk) => {
-        data += chunk;
-        if (data.includes("stdout") && data.includes("stderr")) resolve(data);
-      });
-      setTimeout(() => resolve(data), 5000);
-    });
-
+    const output = await collectOutput(pty);
     expect(output).toContain("stdout");
     expect(output).toContain("stderr");
   });
@@ -590,7 +537,6 @@ describe("PipePty: error handling", () => {
 
     const exitInfo = await new Promise<{ exitCode: number; signal: number }>((resolve) => {
       pty.onExit(resolve);
-      setTimeout(() => resolve({ exitCode: -999, signal: -999 }), 5000);
     });
 
     expect(exitInfo.exitCode).toBe(-1);
