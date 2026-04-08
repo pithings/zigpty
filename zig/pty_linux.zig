@@ -183,10 +183,11 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
 /// Raw exit — bypasses musl's exit() and its atexit handlers.
 /// After fork in a mixed musl/Bionic process (Android), musl's exit()
 /// can hang because atexit handlers registered by Node.js/V8 expect
-/// Bionic's libc state. The exit_group syscall terminates immediately.
+/// Bionic's libc state. Uses _exit() which bypasses atexit handlers
+/// while going through the proper libc syscall path (required on
+/// Android where seccomp blocks direct syscall instructions).
 pub fn rawExit(status: u8) noreturn {
-    _ = linux.syscall1(.exit_group, status);
-    unreachable;
+    std.c._exit(@intCast(status));
 }
 
 pub fn resetSignalHandlers() void {
