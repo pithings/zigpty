@@ -48,9 +48,12 @@ export type INative = INativeUnix | INativeWindows;
 
 const isWindows = platform() === "win32";
 
+// Android uses Linux kernel — musl-static binaries work on both
+const osPlatform = platform() === "android" ? "linux" : platform();
+
 function loadNative(): INative {
   const require = createRequire(import.meta.url);
-  const base = `zigpty.${platform()}-${arch()}`;
+  const base = `zigpty.${osPlatform}-${arch()}`;
   const resolve = (name: string) =>
     fileURLToPath(new URL(`../prebuilds/${name}.node`, import.meta.url));
 
