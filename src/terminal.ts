@@ -40,6 +40,7 @@ export class Terminal implements AsyncDisposable {
   private _onData?: (terminal: Terminal, data: Uint8Array) => void;
   private _onExit?: (terminal: Terminal, exitCode: number, signal: string | null) => void;
   private _onDrain?: (terminal: Terminal) => void;
+  private _textDecoder = new TextDecoder();
   /** @internal Listeners for waitFor support. */
   _dataListeners: Array<(data: string) => void> = [];
 
@@ -182,7 +183,7 @@ export class Terminal implements AsyncDisposable {
   _emitData(data: Uint8Array): void {
     this._onData?.(this, data);
     if (this._dataListeners.length > 0) {
-      const text = new TextDecoder().decode(data);
+      const text = this._textDecoder.decode(data);
       for (const listener of this._dataListeners) {
         listener(text);
       }
@@ -211,7 +212,7 @@ export class Terminal implements AsyncDisposable {
 
   private _writeWindows(data: string | Uint8Array): number {
     if (!this._winHandle) return 0;
-    const str = typeof data === "string" ? data : new TextDecoder().decode(data);
+    const str = typeof data === "string" ? data : this._textDecoder.decode(data);
     const len = typeof data === "string" ? Buffer.byteLength(data) : data.byteLength;
     const doWrite = () => this._winNative!.write(this._winHandle!, str);
     if (this._winReady) doWrite();
