@@ -44,12 +44,11 @@ const CHAR_CR = 0x0d; // \r
 const CHAR_LF = 0x0a; // \n
 
 // Known interactive shells — when spawned via pipes, these benefit from `-i`
-const KNOWN_SHELLS = new Set(["bash", "zsh", "sh", "fish", "ash", "dash", "ksh"]);
+const KNOWN_SHELLS = /\b(?:bash|zsh|sh|fish|ash|dash|ksh)$/;
 
-function isShellCommand(file: string): boolean {
-  const base = file.split("/").pop() ?? "";
-  return KNOWN_SHELLS.has(base);
-}
+// Shells that echo input back through stdout when run with `-i` over pipes.
+// bash does; zsh/fish/others don't (they disable ZLE/line editor on non-TTY).
+const SHELLS_WITH_PIPE_ECHO = /\b(?:bash|sh|ash|dash|ksh)$/;
 
 export class PipePty extends BasePty {
   private _child: ChildProcess;
@@ -76,7 +75,7 @@ export class PipePty extends BasePty {
     const cwd = options?.cwd ?? process.cwd();
     const envObj = options?.env ?? process.env;
 
-    const isShell = options?.shell ?? isShellCommand(file);
+    const isShell = options?.shell ?? KNOWN_SHELLS.test(file);
 
     // Build env as a plain object (child_process wants Record<string,string>)
     const env: Record<string, string> = {};
@@ -92,38 +91,47 @@ export class PipePty extends BasePty {
     if (!env.FORCE_COLOR) env.FORCE_COLOR = "1";
     if (!env.COLORTERM) env.COLORTERM = "truecolor";
 
+    // Skip -i in WebContainers — jsh crashes calling process.stdin.setRawMode().
+    const isWebContainer =
+      !!globalThis?.process?.versions?.webcontainer ||
+      env.SHELL?.includes("jsh");
+    const shellInteractive = isShell && !args.includes("-c") && !isWebContainer;
+
     const spawnOpts: Parameters<typeof cpSpawn>[2] = {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
       // Create a new session (setsid) so the child doesn't interfere with
       // the parent's controlling terminal (prevents SIGTTIN/SIGTTOU)
-      ...(isShell && { detached: true }),
+      ...(isShell && !isWebContainer && { detached: true }),
     };
 
     if (options?.uid !== undefined) (spawnOpts as any).uid = options.uid;
     if (options?.gid !== undefined) (spawnOpts as any).gid = options.gid;
 
-    // For known shells: force interactive mode (-i) for prompts, history, line editing.
-    // detached:true (setsid) gives the child its own session so it can't SIGTTIN/SIGTTOU
-    // the parent's terminal. trap TTOU/TTIN is belt-and-suspenders for edge cases.
-    // Merge stderr→stdout (real PTYs do the same).
-    if (isShell && !args.includes("-c")) {
-      const shellArgs = [...args, "-i"].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+    const selfEcho = SHELLS_WITH_PIPE_ECHO.test(file);
+
+    // For shells that echo over pipes (bash): wrap with sh -c to merge
+    // stderr→stdout (warnings become filterable) and use raw mode (shell
+    // handles its own line editing + echo).
+    // For shells that don't echo (zsh, fish): spawn directly with -i,
+    // keep PipePty canonical mode (provides echo + basic line editing).
+    if (shellInteractive && selfEcho) {
+      const shellArgs = [...args, "-i"]
+        .map((a) => `'${a.replace(/'/g, "'\\''")}'`)
+        .join(" ");
       this._child = cpSpawn(
         "sh",
         ["-c", `trap '' TTOU TTIN; exec ${file} ${shellArgs} 2>&1`],
         spawnOpts,
       );
       this._shellWarningFilter = true;
+      this._canonicalMode = false;
+      this._echoEnabled = false;
+      this._flushLineBuffer();
     } else {
-      this._child = cpSpawn(file, args, spawnOpts);
-    }
-
-    // For interactive shells, use raw mode (pass-through) so the shell
-    // handles its own line editing instead of PipePty's canonical mode
-    if (isShell) {
-      this.setRawMode();
+      const spawnArgs = shellInteractive ? [...args, "-i"] : args;
+      this._child = cpSpawn(file, spawnArgs, spawnOpts);
     }
     this.pid = this._child.pid ?? -1;
 
@@ -226,7 +234,17 @@ export class PipePty extends BasePty {
       }
 
       // Raw mode: pass through directly
-      this._writeToChild(String.fromCharCode(byte));
+      // Translate CR→LF for child (mimics kernel ICRNL termios flag)
+      const outByte = byte === CHAR_CR ? CHAR_LF : byte;
+      const ch = String.fromCharCode(outByte);
+      if (this._echoEnabled) {
+        if (outByte === CHAR_LF) {
+          this._echoText("\r\n");
+        } else {
+          this._echoText(ch);
+        }
+      }
+      this._writeToChild(ch);
     }
   }
 

@@ -1,10 +1,20 @@
+import { parseArgs } from "node:util";
 import { spawn, hasNative } from "../src/index.ts";
 
-const usePipe = process.argv.includes("--pipe");
+const { values } = parseArgs({
+  options: {
+    pipe: { type: "boolean", default: false },
+    shell: { type: "string", default: process.env.SHELL || "/bin/sh" },
+  },
+  allowPositionals: false,
+});
 
-console.log(`Spawning bash (native: ${hasNative}, pipe: ${usePipe})`);
+const shell = values.shell!;
+const usePipe = values.pipe!;
 
-const pty = spawn("/bin/bash", ["--norc", "--noprofile"], {
+console.log(`Spawning ${shell} (native: ${hasNative}, pipe: ${usePipe})`);
+
+const pty = spawn(shell, [], {
   cols: process.stdout.columns || 80,
   rows: process.stdout.rows || 24,
   pipe: usePipe,
