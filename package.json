@@ -18,7 +18,7 @@
     "fmt:check": "oxfmt --check . && zig fmt --check zig/",
     "test": "zig build test && vitest run",
     "test:bun": "zig build test && bun test",
-    "release": "bun run build && changelogen --release --push --publish"
+    "release": "bun run build && changelogen --release --push"
   },
   "devDependencies": {
     "@types/bun": "^1.3.11",
