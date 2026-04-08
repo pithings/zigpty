@@ -1,6 +1,6 @@
 # zigpty
 
-Tiny, cross-platform PTY library for Node.js, built in Zig, also usable as a standalone Zig package. Supports Linux, macOS, and Windows (via ConPTY).
+Tiny, cross-platform PTY library for Node.js, built in Zig, also usable as a standalone Zig package. Supports Linux, macOS, Android and Windows (via ConPTY).
 
 Drop-in replacement for [`node-pty`](https://github.com/microsoft/node-pty). **350x smaller** (43 KB vs 15.5 MB packed, 176 KB vs 64.4 MB installed), no `node-gyp` or C++ compiler needed, and ships musl prebuilds for Alpine.
 
