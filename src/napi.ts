@@ -51,22 +51,31 @@ const isWindows = platform() === "win32";
 // Android uses Linux kernel — musl-static binaries work on both
 const osPlatform = platform() === "android" ? "linux" : platform();
 
-function loadNative(): INative {
-  const require = createRequire(import.meta.url);
-  const base = `zigpty.${osPlatform}-${arch()}`;
-  const resolve = (name: string) =>
-    fileURLToPath(new URL(`../prebuilds/${name}.node`, import.meta.url));
-
-  if (isWindows) {
-    return require(resolve(base)) as INativeWindows;
-  }
-
-  // Try glibc build first, fall back to musl (for Alpine/musl-based distros)
+function loadNative(): INative | null {
   try {
-    return require(resolve(base)) as INativeUnix;
-  } catch {}
-  return require(resolve(`${base}-musl`)) as INativeUnix;
+    const require = createRequire(import.meta.url);
+    const base = `zigpty.${osPlatform}-${arch()}`;
+    const resolve = (name: string) =>
+      fileURLToPath(new URL(`../prebuilds/${name}.node`, import.meta.url));
+
+    if (isWindows) {
+      return require(resolve(base)) as INativeWindows;
+    }
+
+    // Try glibc build first, fall back to musl (for Alpine/musl-based distros)
+    try {
+      return require(resolve(base)) as INativeUnix;
+    } catch {}
+    return require(resolve(`${base}-musl`)) as INativeUnix;
+  } catch {
+    // Native bindings unavailable — will fall back to pipe-based PTY
+    return null;
+  }
 }
 
-export const native: INative = loadNative();
+export const native: INative | null = loadNative();
+
+/** True when native Zig PTY bindings loaded successfully. */
+export const hasNative: boolean = native !== null;
+
 export { isWindows };

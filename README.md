@@ -80,6 +80,7 @@ interface IPtyOptions {
   uid?: number; // Unix user ID
   gid?: number; // Unix group ID
   handleFlowControl?: boolean; // Intercept XON/XOFF (default: false)
+  pipe?: boolean; // Force pipe-based fallback (default: false)
   terminal?: TerminalOptions | Terminal; // Bun-compatible terminal callbacks
   onExit?: (exitCode: number, signal: number) => void;
 }
@@ -151,6 +152,10 @@ await pty.exited;
 
 Options: `{ timeout?: number }` — default 30 seconds. Throws if the pattern is not found within the timeout.
 
+### `hasNative`
+
+Boolean — `true` when native Zig PTY bindings loaded successfully, `false` when running in pipe fallback mode.
+
 ### `open(options?)`
 
 Create a PTY pair without spawning a process — useful when you need to control the child process yourself.
@@ -160,6 +165,43 @@ import { open } from "zigpty";
 
 const { master, slave, pty } = open({ cols: 80, rows: 24 });
 ```
+
+## Pipe fallback
+
+When native Zig PTY bindings can't load (missing prebuilds, sandboxed containers, WASM, minimal libc), `spawn()` automatically falls back to a pure-TypeScript pipe-based PTY instead of crashing. This covers containers without `/dev/ptmx`, CI environments without prebuilds, and restricted runtimes.
+
+You can also force the pipe fallback explicitly with the `pipe` option:
+
+```ts
+import { spawn, hasNative } from "zigpty";
+
+// Automatic — uses native if available, pipes otherwise
+const pty = spawn("ls", ["-la"]);
+
+// Explicit — force pipe mode even when native is available
+const pty = spawn("ls", ["-la"], { pipe: true });
+```
+
+You can also use `PipePty` directly:
+
+```ts
+import { PipePty } from "zigpty";
+
+const pty = new PipePty("/bin/sh", ["-c", "echo hello"]);
+```
+
+The pipe fallback emulates terminal behavior where possible:
+
+- **Signal translation** — `^C`→SIGINT, `^Z`→SIGTSTP, `^\`→SIGQUIT, `^D`→EOF
+- **Line discipline** — canonical mode with echo, backspace, `^W` word erase, `^U` line kill
+- **Flow control** — XON/XOFF interception (when `handleFlowControl` is enabled)
+- **Force-color hints** — auto-sets `FORCE_COLOR=1` and `COLORTERM=truecolor`
+- **Resize** — sends `SIGWINCH` to the child process as a best-effort hint
+- **Process tracking** — reads foreground process name from `/proc` on Linux
+
+Raw mode (no echo, no line buffering) is available via `setRawMode()` / `setCanonicalMode()` on `PipePty` instances.
+
+**Known limitations** — programs see `isatty()` → false, no kernel-level TIOCSWINSZ, `open()` throws in fallback mode.
 
 ## Platform support
 

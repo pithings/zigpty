@@ -73,4 +73,6 @@ export interface IPtyOptions {
   terminal?: TerminalOptions | Terminal;
   /** Called when the process exits (alternative to onExit event). */
   onExit?: (exitCode: number, signal: number) => void;
+  /** Force pipe-based PTY fallback even when native bindings are available. */
+  pipe?: boolean;
 }
