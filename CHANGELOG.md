@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.1
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.1.0...v0.1.1)
+
+### 🚀 Enhancements
+
+- **linux:** Add execve linker fallback for Android/Termux noexec mounts ([4febf60](https://github.com/pithings/zigpty/commit/4febf60))
+
+### 🏡 Chore
+
+- Update release script ([52d39a8](https://github.com/pithings/zigpty/commit/52d39a8))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+
 ## v0.1.0
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.0.7...v0.1.0)
