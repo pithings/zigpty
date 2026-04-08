@@ -43,6 +43,14 @@ const CHAR_REPRINT = 0x12; // ^R
 const CHAR_CR = 0x0d; // \r
 const CHAR_LF = 0x0a; // \n
 
+// Known interactive shells — when spawned via pipes, these benefit from `-i`
+const KNOWN_SHELLS = new Set(["bash", "zsh", "sh", "fish", "ash", "dash", "ksh"]);
+
+function isShellCommand(file: string): boolean {
+  const base = file.split("/").pop() ?? "";
+  return KNOWN_SHELLS.has(base);
+}
+
 export class PipePty extends BasePty {
   private _child: ChildProcess;
   private _file: string;
@@ -54,6 +62,9 @@ export class PipePty extends BasePty {
   private _echoEnabled = true;
   private _lineBuffer = "";
 
+  // Filter bash/sh startup warnings from -i on non-TTY (auto-disables after first prompt)
+  private _shellWarningFilter = false;
+
   constructor(file: string, args: string[], options?: IPtyOptions) {
     const cols = options?.cols ?? DEFAULT_COLS;
     const rows = options?.rows ?? DEFAULT_ROWS;
@@ -64,6 +75,8 @@ export class PipePty extends BasePty {
 
     const cwd = options?.cwd ?? process.cwd();
     const envObj = options?.env ?? process.env;
+
+    const isShell = options?.shell ?? isShellCommand(file);
 
     // Build env as a plain object (child_process wants Record<string,string>)
     const env: Record<string, string> = {};
@@ -83,12 +96,35 @@ export class PipePty extends BasePty {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
+      // Create a new session (setsid) so the child doesn't interfere with
+      // the parent's controlling terminal (prevents SIGTTIN/SIGTTOU)
+      ...(isShell && { detached: true }),
     };
 
     if (options?.uid !== undefined) (spawnOpts as any).uid = options.uid;
     if (options?.gid !== undefined) (spawnOpts as any).gid = options.gid;
 
-    this._child = cpSpawn(file, args, spawnOpts);
+    // For known shells: force interactive mode (-i) for prompts, history, line editing.
+    // detached:true (setsid) gives the child its own session so it can't SIGTTIN/SIGTTOU
+    // the parent's terminal. trap TTOU/TTIN is belt-and-suspenders for edge cases.
+    // Merge stderr→stdout (real PTYs do the same).
+    if (isShell && !args.includes("-c")) {
+      const shellArgs = [...args, "-i"].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+      this._child = cpSpawn(
+        "sh",
+        ["-c", `trap '' TTOU TTIN; exec ${file} ${shellArgs} 2>&1`],
+        spawnOpts,
+      );
+      this._shellWarningFilter = true;
+    } else {
+      this._child = cpSpawn(file, args, spawnOpts);
+    }
+
+    // For interactive shells, use raw mode (pass-through) so the shell
+    // handles its own line editing instead of PipePty's canonical mode
+    if (isShell) {
+      this.setRawMode();
+    }
     this.pid = this._child.pid ?? -1;
 
     // --- Wire up stdout ---
@@ -333,6 +369,28 @@ export class PipePty extends BasePty {
 
   private _emitData(chunk: Buffer): void {
     if (this._paused) return;
+
+    // Strip bash startup warnings ("cannot set terminal process group", "no job control")
+    // that appear when running with -i on non-TTY fds. Auto-disables after first prompt.
+    if (this._shellWarningFilter) {
+      const str = chunk.toString("utf8");
+      const filtered = str
+        .replace(
+          /^bash: cannot set terminal process group \(\d+\): Inappropriate ioctl for device\n?/m,
+          "",
+        )
+        .replace(/^bash: no job control in this shell\n?/m, "")
+        .replace(/^.*: cannot set terminal process group.*\n?/m, "")
+        .replace(/^.*: no job control in this shell\n?/m, "");
+      if (filtered !== str) {
+        if (filtered.length === 0) return;
+        chunk = Buffer.from(filtered, "utf8");
+      }
+      // Disable filter after first real output arrives
+      if (filtered.length > 0) {
+        this._shellWarningFilter = false;
+      }
+    }
 
     // Feed terminal callbacks
     if (this._terminal) {

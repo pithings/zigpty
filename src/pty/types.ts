@@ -75,4 +75,6 @@ export interface IPtyOptions {
   onExit?: (exitCode: number, signal: number) => void;
   /** Force pipe-based PTY fallback even when native bindings are available. */
   pipe?: boolean;
+  /** Treat the command as an interactive shell (auto-enables `-i`, raw mode, stderr merge). Auto-detected for known shells (bash, zsh, sh, fish, etc.) when unset. */
+  shell?: boolean;
 }
