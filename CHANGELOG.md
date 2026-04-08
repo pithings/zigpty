@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.2
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.1.1...v0.1.2)
+
+### 🩹 Fixes
+
+- **linux:** Use libc `_exit()` instead of raw `exit_group` syscall ([4af46c0](https://github.com/pithings/zigpty/commit/4af46c0))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+
 ## v0.1.1
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.1.0...v0.1.1)
