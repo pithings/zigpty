@@ -254,6 +254,26 @@ Options: `{ timeout?: number }` (default: 30s). Throws on timeout.
 - **Android errno shim** (`zig/errno_shim.c`): Android's Bionic libc uses `__errno()` instead of musl's `__errno_location()`. All musl builds link a tiny C shim with weak symbols — `__errno_location` (weak defined) forwards to `__errno` (weak undefined). On musl Linux, musl's strong `__errno_location` overrides the shim. On Android/Bionic, the shim activates and `__errno` resolves from Bionic's libc. No separate Android binary needed.
 - **Platform-aware native loading**: `napi.ts` resolves `zigpty.<os>-<arch>.node` with glibc→musl fallback on Linux. On Android (`platform() === "android"`), maps to `linux` and loads the musl binary.
 - **`ptsname_r`/`ttyname_r`** in lib.zig (thread-safe) vs `ptsname`/`ttyname` in old pty.zig.
+- **Raw `execve` syscall + PATH search** (Linux): `execChild` uses raw `linux.execve` instead of musl's `execvpe`. On `EACCES` (noexec mount), falls back to `execveLinkerFallback` which reads the ELF `PT_INTERP` header and re-execs via the dynamic linker (e.g. `/system/bin/linker64`). This is the same technique Termux's `libtermux-exec.so` uses. Zero overhead on normal Linux — the fallback is only triggered on `EACCES`.
+- **`rawExit` via `exit_group` syscall** (Linux) / `_exit` (macOS): After `fork()`, the child must not call musl's `exit()` which runs atexit handlers registered by Node.js/V8 — on Android these expect Bionic's libc state, causing hangs or zombies. `exit_group` syscall (Linux) or `_exit` (macOS) terminates immediately without atexit handlers.
+
+## Android/Termux Pitfalls
+
+### `execve` fails with `EACCES` on Termux binaries
+
+**Root cause:** `/data/data` is mounted as tmpfs with `noexec`. Termux binaries live under `/data/data/com.termux/files/usr/bin/` — the kernel enforces the parent mount's `noexec` flag on `execve()`. Termux normally works around this via `LD_PRELOAD=libtermux-exec.so`, which intercepts `execve` and rewrites it to invoke the ELF dynamic linker (`/system/bin/linker64`) directly. VS Code's ptyHost process is forked without `LD_PRELOAD`, so `libtermux-exec.so` is absent and native `execve` fails.
+
+**Fix:** `execveLinkerFallback` reads the ELF `PT_INTERP` header from the target binary to get the dynamic linker path, then calls `execve(linker_path, [argv0, binary_path, ...rest], envp)`. Only triggered on `EACCES`, so normal Linux is unaffected.
+
+### musl's `exit()` hangs after `fork()` on Android
+
+**Root cause:** After `fork()`, calling musl's `exit()` (via `std.process.exit`) runs atexit handlers registered by Node.js/V8, which expect Bionic's libc state — this can hang or crash, leaving zombie processes.
+
+**Fix:** `rawExit` calls the `exit_group` syscall directly on Linux (or `_exit` on macOS), bypassing all atexit handlers.
+
+### Android can't be distinguished at comptime
+
+Zig cross-compiles for `aarch64-linux-musl` — same target for both Android and regular Linux ARM64. The `EACCES` check is the runtime gate: it only fires on noexec mounts (Android), so no comptime or explicit Android detection is needed.
 
 ## Windows ConPTY Pitfalls
 

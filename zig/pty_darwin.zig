@@ -52,6 +52,13 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
     return buf[0..len];
 }
 
+/// Raw exit — bypasses libc's exit() and its atexit handlers.
+/// After fork, atexit handlers from the parent (Node.js/V8) should not run.
+pub fn rawExit(status: u8) noreturn {
+    // _exit (not exit) is the POSIX-correct way to terminate a forked child
+    std.c._exit(@intCast(status));
+}
+
 pub fn resetSignalHandlers() void {
     var sa = std.mem.zeroes(std.c.Sigaction);
     sa.handler = .{ .handler = std.c.SIG.DFL };

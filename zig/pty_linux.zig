@@ -7,8 +7,152 @@ extern fn execvpe(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp:
 extern fn ptsname_r(fd: c_int, buf: [*]u8, buflen: usize) c_int;
 extern fn tcgetpgrp(fd: c_int) c_int;
 
+/// Execute a child process, searching PATH if needed.
+/// Uses musl's execvpe for PATH resolution, with a fallback that invokes
+/// the ELF interpreter directly to bypass noexec mounts
+/// (required on Android/Termux where /data/data is mounted noexec).
 pub fn execChild(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) void {
     _ = execvpe(file, argv, envp);
+    // Only attempt the linker fallback on EACCES from noexec mounts (Android/Termux).
+    // Distinguish noexec EACCES from permission EACCES: if the file has +x but
+    // execve still returned EACCES, the mount must be noexec.
+    if (std.c._errno().* == @intFromEnum(std.c.E.ACCES)) {
+        const file_slice = std.mem.sliceTo(file, 0);
+        const resolved = if (std.mem.indexOfScalar(u8, file_slice, '/') != null)
+            file
+        else
+            resolveInPath(file_slice, envp) orelse return;
+        // If the file is executable (+x) but execve failed, it must be a noexec mount
+        if (isExecutable(resolved)) {
+            execveLinkerFallback(resolved, argv, envp);
+        }
+    }
+}
+
+/// Bypass noexec mount restrictions by invoking the dynamic linker directly.
+/// On Android/Termux, /data/data is mounted noexec. termux-exec works around this
+/// by calling execve("/system/bin/linker64", [argv0, "/path/to/binary", ...args], envp)
+/// — the linker lives on /system (not noexec) and loads the target binary itself.
+fn execveLinkerFallback(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) void {
+    // Read ELF interpreter from the binary's PT_INTERP header
+    var interp_buf: [256]u8 = undefined;
+    const interp = readElfInterp(file, &interp_buf) orelse return;
+
+    // Build new argv: [original_argv0, file, original_argv1..]
+    // Stack-allocate space for the new argv (max 256 args)
+    var new_argv: [258]?[*:0]const u8 = undefined;
+    new_argv[0] = argv[0]; // preserve argv[0] (program name)
+    new_argv[1] = file; // linker needs the binary path as first real arg
+
+    var i: usize = 1;
+    while (i < new_argv.len - 2) : (i += 1) {
+        const arg = argv[i];
+        new_argv[i + 1] = arg;
+        if (arg == null) break;
+    }
+    if (i >= new_argv.len - 2) new_argv[new_argv.len - 1] = null;
+
+    const new_argv_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(&new_argv);
+    _ = linux.execve(interp, new_argv_ptr, envp);
+}
+
+/// Read the PT_INTERP (dynamic linker path) from an ELF binary.
+fn readElfInterp(file: [*:0]const u8, buf: *[256]u8) ?[*:0]const u8 {
+    const fd_rc = linux.open(file, .{ .ACCMODE = .RDONLY }, 0);
+    if (linux.E.init(fd_rc) != .SUCCESS) return null;
+    defer _ = linux.close(@intCast(fd_rc));
+    const fd: i32 = @intCast(fd_rc);
+
+    // Read ELF header
+    var ehdr: [64]u8 = undefined;
+    const n = linux.read(fd, &ehdr, 64);
+    if (linux.E.init(n) != .SUCCESS or n < 64) return null;
+
+    // Verify ELF magic
+    if (ehdr[0] != 0x7f or ehdr[1] != 'E' or ehdr[2] != 'L' or ehdr[3] != 'F') return null;
+
+    const is_64 = ehdr[4] == 2;
+    if (!is_64) return null; // Only support 64-bit
+
+    // Parse e_phoff, e_phentsize, e_phnum from ELF64 header
+    const e_phoff: u64 = std.mem.readInt(u64, ehdr[32..40], .little);
+    const e_phentsize: u16 = std.mem.readInt(u16, ehdr[54..56], .little);
+    const e_phnum: u16 = std.mem.readInt(u16, ehdr[56..58], .little);
+
+    // Scan program headers for PT_INTERP (type = 3)
+    var ph_buf: [56]u8 = undefined; // ELF64 phdr is 56 bytes
+    var idx: u16 = 0;
+    while (idx < e_phnum) : (idx += 1) {
+        const off = e_phoff + @as(u64, idx) * e_phentsize;
+        if (linux.E.init(linux.lseek(fd, @bitCast(off), linux.SEEK.SET)) != .SUCCESS) continue;
+        const pn = linux.read(fd, &ph_buf, @min(e_phentsize, 56));
+        if (linux.E.init(pn) != .SUCCESS or pn < 56) continue;
+
+        const p_type = std.mem.readInt(u32, ph_buf[0..4], .little);
+        if (p_type != 3) continue; // PT_INTERP = 3
+
+        const p_offset: u64 = std.mem.readInt(u64, ph_buf[8..16], .little);
+        const p_filesz: u64 = std.mem.readInt(u64, ph_buf[32..40], .little);
+        if (p_filesz == 0 or p_filesz > buf.len) return null;
+
+        if (linux.E.init(linux.lseek(fd, @bitCast(p_offset), linux.SEEK.SET)) != .SUCCESS) return null;
+        const rn = linux.read(fd, buf, @intCast(p_filesz));
+        if (linux.E.init(rn) != .SUCCESS or rn < p_filesz) return null;
+
+        // Ensure null-terminated
+        const len: usize = @intCast(p_filesz);
+        if (buf[len - 1] == 0) {
+            return @ptrCast(buf[0 .. len - 1 :0]);
+        }
+        if (len < buf.len) {
+            buf[len] = 0;
+            return @ptrCast(buf[0..len :0]);
+        }
+        return null;
+    }
+    return null;
+}
+
+/// Check if a file has executable permission (but may be on a noexec mount).
+fn isExecutable(path: [*:0]const u8) bool {
+    return linux.E.init(linux.faccessat(linux.AT.FDCWD, path, linux.X_OK, 0)) == .SUCCESS;
+}
+
+/// Resolve a command name to a full path by searching PATH from envp.
+/// Uses a static buffer — returned pointer is valid until next call.
+var resolve_buf: [std.fs.max_path_bytes]u8 = undefined;
+fn resolveInPath(file: []const u8, envp: [*:null]const ?[*:0]const u8) ?[*:0]const u8 {
+    const path_env = getEnvFromEnvp(envp, "PATH") orelse return null;
+    var it = std.mem.splitScalar(u8, path_env, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        if (dir.len + 1 + file.len + 1 > resolve_buf.len) continue;
+        @memcpy(resolve_buf[0..dir.len], dir);
+        resolve_buf[dir.len] = '/';
+        @memcpy(resolve_buf[dir.len + 1 ..][0..file.len], file);
+        resolve_buf[dir.len + 1 + file.len] = 0;
+        const full: [*:0]const u8 = @ptrCast(resolve_buf[0 .. dir.len + 1 + file.len :0]);
+        // Check if the file exists and is executable
+        if (linux.E.init(linux.faccessat(linux.AT.FDCWD, full, linux.X_OK, 0)) == .SUCCESS) {
+            return full;
+        }
+    }
+    return null;
+}
+
+/// Extract a value from a null-terminated envp array.
+fn getEnvFromEnvp(envp: [*:null]const ?[*:0]const u8, key: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (envp[i]) |entry| : (i += 1) {
+        const entry_slice = std.mem.sliceTo(entry, 0);
+        if (entry_slice.len > key.len and
+            entry_slice[key.len] == '=' and
+            std.mem.eql(u8, entry_slice[0..key.len], key))
+        {
+            return entry_slice[key.len + 1 ..];
+        }
+    }
+    return null;
 }
 
 pub fn getPtyName(fd: c_int, buf: *[256]u8) usize {
@@ -34,6 +178,15 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
 
     const cmd = std.mem.sliceTo(buf[0..bytes_read], 0);
     return if (std.mem.lastIndexOfScalar(u8, cmd, '/')) |p| cmd[p + 1 ..] else cmd;
+}
+
+/// Raw exit — bypasses musl's exit() and its atexit handlers.
+/// After fork in a mixed musl/Bionic process (Android), musl's exit()
+/// can hang because atexit handlers registered by Node.js/V8 expect
+/// Bionic's libc state. The exit_group syscall terminates immediately.
+pub fn rawExit(status: u8) noreturn {
+    _ = linux.syscall1(.exit_group, status);
+    unreachable;
 }
 
 pub fn resetSignalHandlers() void {

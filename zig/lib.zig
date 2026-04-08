@@ -127,20 +127,20 @@ fn forkPtyUnix(opts: ForkOptions) PtyError!ForkResult {
         platform.resetSignalHandlers();
 
         if (std.c.chdir(opts.cwd) != 0) {
-            std.process.exit(1);
+            platform.rawExit(1);
         }
 
         if (opts.gid) |gid| {
-            if (std.c.setgid(gid) != 0) std.process.exit(1);
+            if (std.c.setgid(gid) != 0) platform.rawExit(1);
         }
         if (opts.uid) |uid| {
-            if (std.c.setuid(uid) != 0) std.process.exit(1);
+            if (std.c.setuid(uid) != 0) platform.rawExit(1);
         }
 
         platform.closeExcessFds();
 
         platform.execChild(opts.file, opts.argv, opts.envp);
-        std.process.exit(1);
+        platform.rawExit(1);
     }
 
     _ = std.c.sigprocmask(std.c.SIG.SETMASK, @ptrCast(&sigset_old), null);
