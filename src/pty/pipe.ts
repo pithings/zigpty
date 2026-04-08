@@ -93,8 +93,7 @@ export class PipePty extends BasePty {
 
     // Skip -i in WebContainers — jsh crashes calling process.stdin.setRawMode().
     const isWebContainer =
-      !!globalThis?.process?.versions?.webcontainer ||
-      env.SHELL?.includes("jsh");
+      !!globalThis?.process?.versions?.webcontainer || env.SHELL?.includes("jsh");
     const shellInteractive = isShell && !args.includes("-c") && !isWebContainer;
 
     const spawnOpts: Parameters<typeof cpSpawn>[2] = {
@@ -117,9 +116,7 @@ export class PipePty extends BasePty {
     // For shells that don't echo (zsh, fish): spawn directly with -i,
     // keep PipePty canonical mode (provides echo + basic line editing).
     if (shellInteractive && selfEcho) {
-      const shellArgs = [...args, "-i"]
-        .map((a) => `'${a.replace(/'/g, "'\\''")}'`)
-        .join(" ");
+      const shellArgs = [...args, "-i"].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
       this._child = cpSpawn(
         "sh",
         ["-c", `trap '' TTOU TTIN; exec ${file} ${shellArgs} 2>&1`],
