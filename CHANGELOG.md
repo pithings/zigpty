@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.0
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.0.7...v0.1.0)
+
+### 🤖 CI
+
+- Setup trusted publishing ([b805187](https://github.com/pithings/zigpty/commit/b805187))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+
 ## v0.0.7
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.0.6...v0.0.7)
