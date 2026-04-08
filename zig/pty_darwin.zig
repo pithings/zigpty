@@ -64,6 +64,8 @@ pub fn resetSignalHandlers() void {
 
 pub fn closeExcessFds() void {
     // Enumerate /dev/fd to close only open FDs, avoids ~1M close() syscalls via sysconf.
+    // TODO: Apple has deprecated getdirentries — zig std.c.getdirentries maps to
+    // __getdirentries64 which still works, but may need a fallback if Apple removes it.
     const dir_fd = std.c.open("/dev/fd", .{
         .ACCMODE = .RDONLY,
         .DIRECTORY = true,
