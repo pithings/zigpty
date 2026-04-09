@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.1.3
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.1.2...v0.1.3)
+
+### 🩹 Fixes
+
+- **linux:** Preserve SIGSYS handler for Android seccomp softfail ([623be5b](https://github.com/pithings/zigpty/commit/623be5b))
+
+### 🏡 Chore
+
+- Use vitest for release ([c39b950](https://github.com/pithings/zigpty/commit/c39b950))
+
+### 🤖 CI
+
+- Fix flaky test ([483d969](https://github.com/pithings/zigpty/commit/483d969))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+
 ## v0.1.2
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.1.1...v0.1.2)
