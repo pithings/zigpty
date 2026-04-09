@@ -454,10 +454,7 @@ describeUnix("PipePty: encoding", () => {
         }
       });
       pty.onExit(() => {
-        setTimeout(
-          () => resolve(chunks.length > 0 ? Buffer.concat(chunks) : Buffer.from("")),
-          50,
-        );
+        setTimeout(() => resolve(chunks.length > 0 ? Buffer.concat(chunks) : Buffer.from("")), 50);
       });
     });
 
@@ -492,10 +489,7 @@ describeUnix("PipePty: waitFor", () => {
 
 describeUnix("PipePty: onData/onExit dispose", () => {
   it("should stop receiving data after dispose", async () => {
-    const pty = new PipePty("/bin/sh", [
-      "-c",
-      "echo before && sleep 0.5 && echo after",
-    ]);
+    const pty = new PipePty("/bin/sh", ["-c", "echo before && sleep 0.5 && echo after"]);
 
     const received: string[] = [];
     let dispose: () => void;
