@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.5
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.1.4...v0.1.5)
+
+### 📦 Build
+
+- Update zig to 0.15.2 ([79a3b24](https://github.com/pithings/zigpty/commit/79a3b24))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+
 ## v0.1.4
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.1.3...v0.1.4)
