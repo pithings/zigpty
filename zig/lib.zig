@@ -110,6 +110,10 @@ fn forkPtyUnix(opts: ForkOptions) PtyError!ForkResult {
     ws.col = opts.cols;
     ws.row = opts.rows;
 
+    // Ensure libtermux-exec.so is loaded on Android/Termux so its SIGSYS
+    // handler is inherited by the forked child (seccomp softfail).
+    if (builtin.os.tag == .linux) platform.ensureTermuxExec();
+
     var sigset_all = std.posix.sigfillset();
     var sigset_old: std.posix.sigset_t = undefined;
     _ = std.c.sigprocmask(std.c.SIG.SETMASK, @ptrCast(&sigset_all), @ptrCast(&sigset_old));

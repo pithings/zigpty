@@ -7,6 +7,11 @@ extern fn execvpe(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp:
 extern fn ptsname_r(fd: c_int, buf: [*]u8, buflen: usize) c_int;
 extern fn tcgetpgrp(fd: c_int) c_int;
 
+// musl dlopen flags (match glibc values)
+const RTLD_LAZY = 0x00001;
+const RTLD_GLOBAL = 0x00100;
+extern fn dlopen(filename: ?[*:0]const u8, flags: c_int) ?*anyopaque;
+
 /// Execute a child process, searching PATH if needed.
 /// Uses musl's execvpe for PATH resolution, with a fallback that invokes
 /// the ELF interpreter directly to bypass noexec mounts
@@ -180,6 +185,19 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
     return if (std.mem.lastIndexOfScalar(u8, cmd, '/')) |p| cmd[p + 1 ..] else cmd;
 }
 
+/// Ensure libtermux-exec.so is loaded on Termux/Android.
+/// This library installs a SIGSYS handler for seccomp softfail — without it,
+/// syscalls like close_range (kernel <5.9) trigger SECCOMP_RET_TRAP which
+/// kills the process with signal 31 (SIGSYS). Loading it in the parent
+/// ensures forked children inherit the handler before exec.
+/// Uses bare name so the dynamic linker resolves via LD_LIBRARY_PATH and
+/// default search paths. On non-Termux Linux, fails silently.
+var termux_exec_loaded = std.atomic.Value(bool).init(false);
+pub fn ensureTermuxExec() void {
+    if (termux_exec_loaded.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return;
+    _ = dlopen("libtermux-exec.so", RTLD_LAZY | RTLD_GLOBAL);
+}
+
 /// Raw exit — bypasses musl's exit() and its atexit handlers.
 /// After fork in a mixed musl/Bionic process (Android), musl's exit()
 /// can hang because atexit handlers registered by Node.js/V8 expect
@@ -196,18 +214,21 @@ pub fn resetSignalHandlers() void {
     var i: u8 = 1;
     while (i < linux.NSIG) : (i += 1) {
         if (i == linux.SIG.KILL or i == linux.SIG.STOP) continue;
-        // Keep bionic's SIGSYS handler for Android seccomp softfail.
-        // Android's seccomp uses SECCOMP_RET_TRAP for unsupported syscalls
-        // (e.g. close_range on kernel <5.9); bionic's handler converts
-        // these to ENOSYS. Resetting to SIG_DFL causes the child to be
-        // killed with signal 31 (SIGSYS) instead.
+        // Keep SIGSYS handler for Android seccomp softfail.
+        // ensureTermuxExec() loads libtermux-exec.so before fork, which
+        // installs a SIGSYS handler that converts SECCOMP_RET_TRAP to
+        // ENOSYS. We must preserve it so closeExcessFds() can safely
+        // attempt close_range on older kernels.
         if (i == linux.SIG.SYS) continue;
         _ = linux.sigaction(i, &sa, null);
     }
 }
 
 pub fn closeExcessFds() void {
-    // Try close_range syscall directly (Linux 5.9+, avoids libc dependency)
+    // Try close_range syscall directly (Linux 5.9+, avoids libc dependency).
+    // On Android, ensureTermuxExec() must be called before fork so the
+    // child inherits libtermux-exec.so's SIGSYS handler — without it,
+    // seccomp kills the process instead of returning ENOSYS.
     const rc = linux.syscall3(.close_range, 3, std.math.maxInt(c_uint), 0);
     if (linux.E.init(rc) == .SUCCESS) return;
 
