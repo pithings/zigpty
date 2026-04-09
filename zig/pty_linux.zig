@@ -196,6 +196,12 @@ pub fn resetSignalHandlers() void {
     var i: u8 = 1;
     while (i < linux.NSIG) : (i += 1) {
         if (i == linux.SIG.KILL or i == linux.SIG.STOP) continue;
+        // Keep bionic's SIGSYS handler for Android seccomp softfail.
+        // Android's seccomp uses SECCOMP_RET_TRAP for unsupported syscalls
+        // (e.g. close_range on kernel <5.9); bionic's handler converts
+        // these to ENOSYS. Resetting to SIG_DFL causes the child to be
+        // killed with signal 31 (SIGSYS) instead.
+        if (i == linux.SIG.SYS) continue;
         _ = linux.sigaction(i, &sa, null);
     }
 }
