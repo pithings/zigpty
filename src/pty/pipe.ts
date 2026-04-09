@@ -287,7 +287,13 @@ export class PipePty extends BasePty {
 
   close(): void {
     if (this._closed) return;
-    this._closed = true;
+
+    // Kill the child first, then destroy streams. Setting _closed before
+    // the kill could suppress the "exit"/"error" callbacks that fire
+    // _handleExit, leaving the test (and any onExit listener) hanging.
+    try {
+      this._child.kill("SIGHUP");
+    } catch {}
 
     try {
       this._child.stdin?.destroy();
@@ -299,9 +305,7 @@ export class PipePty extends BasePty {
       this._child.stderr?.destroy();
     } catch {}
 
-    try {
-      this._child.kill("SIGHUP");
-    } catch {}
+    this._closed = true;
   }
 
   private _handleCanonicalByte(byte: number): void {
