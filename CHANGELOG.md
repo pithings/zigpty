@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.4
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.1.3...v0.1.4)
+
+### 🩹 Fixes
+
+- **linux:** Dlopen libtermux-exec.so on Android for seccomp softfail ([ec59820](https://github.com/pithings/zigpty/commit/ec59820))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+
 ## v0.1.3
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.1.2...v0.1.3)
