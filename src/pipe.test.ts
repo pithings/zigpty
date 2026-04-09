@@ -494,17 +494,23 @@ describeUnix("PipePty: onData/onExit dispose", () => {
   it("should stop receiving data after dispose", async () => {
     const pty = new PipePty("/bin/sh", [
       "-c",
-      "sleep 0.1 && echo before && sleep 0.3 && echo after",
+      "echo before && sleep 0.5 && echo after",
     ]);
 
     const received: string[] = [];
-    const disposable = pty.onData((data) => {
-      if (typeof data === "string") received.push(data);
+    let dispose: () => void;
+    await new Promise<void>((resolve) => {
+      const disposable = pty.onData((data) => {
+        if (typeof data === "string") {
+          received.push(data);
+          if (received.join("").includes("before")) resolve();
+        }
+      });
+      dispose = () => disposable.dispose();
     });
-
-    await new Promise((r) => setTimeout(r, 250));
-    disposable.dispose();
-    await new Promise((r) => setTimeout(r, 400));
+    dispose!();
+    // "before" was received and listener disposed — wait for "after" to pass
+    await new Promise((r) => setTimeout(r, 700));
 
     const all = received.join("");
     expect(all).toContain("before");
