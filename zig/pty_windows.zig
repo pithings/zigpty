@@ -198,6 +198,80 @@ extern "kernel32" fn WriteFile(
 extern "kernel32" fn GetLastError() callconv(.c) DWORD;
 extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.c) BOOL;
 
+const FILETIME = extern struct {
+    dwLowDateTime: DWORD,
+    dwHighDateTime: DWORD,
+};
+
+const PROCESS_MEMORY_COUNTERS = extern struct {
+    cb: DWORD,
+    PageFaultCount: DWORD,
+    PeakWorkingSetSize: usize,
+    WorkingSetSize: usize,
+    QuotaPeakPagedPoolUsage: usize,
+    QuotaPagedPoolUsage: usize,
+    QuotaPeakNonPagedPoolUsage: usize,
+    QuotaNonPagedPoolUsage: usize,
+    PagefileUsage: usize,
+    PeakPagefileUsage: usize,
+};
+
+extern "kernel32" fn GetProcessTimes(
+    hProcess: HANDLE,
+    lpCreationTime: *FILETIME,
+    lpExitTime: *FILETIME,
+    lpKernelTime: *FILETIME,
+    lpUserTime: *FILETIME,
+) callconv(.c) BOOL;
+
+// K32GetProcessMemoryInfo is in kernel32.dll since Windows 7, avoids linking psapi.
+extern "kernel32" fn K32GetProcessMemoryInfo(
+    hProcess: HANDLE,
+    ppsmemCounters: *PROCESS_MEMORY_COUNTERS,
+    cb: DWORD,
+) callconv(.c) BOOL;
+
+extern "kernel32" fn GetProcessId(hProcess: HANDLE) callconv(.c) DWORD;
+
+fn filetimeToMicros(ft: FILETIME) u64 {
+    // FILETIME is in 100-nanosecond intervals — divide by 10 for microseconds.
+    const combined: u64 = (@as(u64, ft.dwHighDateTime) << 32) | @as(u64, ft.dwLowDateTime);
+    return combined / 10;
+}
+
+const lib = @import("lib.zig");
+
+/// Get stats for the spawned shell process (no foreground tracking on Windows).
+/// `cwd_buf` is unused — cwd is always null on Windows (no cheap API for remote proc cwd).
+pub fn getStats(process: HANDLE, cwd_buf: []u8) ?lib.Stats {
+    _ = cwd_buf;
+
+    var stats = lib.Stats{
+        .pid = GetProcessId(process),
+        .cwd = null,
+        .rss_bytes = 0,
+        .cpu_user_us = 0,
+        .cpu_sys_us = 0,
+    };
+
+    var pmc = std.mem.zeroes(PROCESS_MEMORY_COUNTERS);
+    pmc.cb = @sizeOf(PROCESS_MEMORY_COUNTERS);
+    if (K32GetProcessMemoryInfo(process, &pmc, @sizeOf(PROCESS_MEMORY_COUNTERS)) != 0) {
+        stats.rss_bytes = pmc.WorkingSetSize;
+    }
+
+    var creation: FILETIME = undefined;
+    var exit: FILETIME = undefined;
+    var kernel: FILETIME = undefined;
+    var user: FILETIME = undefined;
+    if (GetProcessTimes(process, &creation, &exit, &kernel, &user) != 0) {
+        stats.cpu_user_us = filetimeToMicros(user);
+        stats.cpu_sys_us = filetimeToMicros(kernel);
+    }
+
+    return stats;
+}
+
 // --- Public API ---
 
 /// Phase 1: Create ConPTY pipes and pseudo console (no process yet).

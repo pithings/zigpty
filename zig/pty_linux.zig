@@ -2,10 +2,15 @@
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
+const lib = @import("lib.zig");
 
 extern fn execvpe(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
 extern fn ptsname_r(fd: c_int, buf: [*]u8, buflen: usize) c_int;
 extern fn tcgetpgrp(fd: c_int) c_int;
+extern fn sysconf(name: c_int) c_long;
+
+const _SC_CLK_TCK: c_int = 2;
+const _SC_PAGESIZE: c_int = 30;
 
 // musl dlopen flags (match glibc values)
 const RTLD_LAZY = 0x00001;
@@ -183,6 +188,82 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
 
     const cmd = std.mem.sliceTo(buf[0..bytes_read], 0);
     return if (std.mem.lastIndexOfScalar(u8, cmd, '/')) |p| cmd[p + 1 ..] else cmd;
+}
+
+/// Get stats for the PTY's foreground process group.
+/// `cwd_buf` is used to store the cwd string — returned slice points into it.
+pub fn getStats(fd: posix.fd_t, cwd_buf: []u8) ?lib.Stats {
+    const pgrp = tcgetpgrp(@intCast(fd));
+    if (pgrp < 0) return null;
+    return statsForPid(pgrp, cwd_buf);
+}
+
+fn statsForPid(pid: posix.pid_t, cwd_buf: []u8) ?lib.Stats {
+    var stats = lib.Stats{
+        .pid = pid,
+        .cwd = null,
+        .rss_bytes = 0,
+        .cpu_user_us = 0,
+        .cpu_sys_us = 0,
+    };
+
+    var path_buf: [64]u8 = undefined;
+
+    // Resolve /proc/<pid>/cwd via readlink.
+    if (std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid})) |cwd_path| {
+        if (std.posix.readlink(cwd_path, cwd_buf)) |link| {
+            if (link.len > 0) stats.cwd = link;
+        } else |_| {}
+    } else |_| {}
+
+    // Read /proc/<pid>/stat for cpu + rss.
+    const stat_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch return stats;
+    const f = std.fs.openFileAbsolute(stat_path, .{}) catch return stats;
+    defer f.close();
+
+    var stat_buf: [1024]u8 = undefined;
+    const n = f.read(&stat_buf) catch return stats;
+    if (n == 0) return stats;
+
+    parseProcStat(stat_buf[0..n], &stats);
+    return stats;
+}
+
+/// Parse /proc/<pid>/stat. Format: `pid (comm) state ppid ...`
+/// comm can contain spaces/parens, so we skip to the LAST ')' then count fields.
+fn parseProcStat(buf: []const u8, stats: *lib.Stats) void {
+    const last_paren = std.mem.lastIndexOfScalar(u8, buf, ')') orelse return;
+    if (last_paren + 2 >= buf.len) return;
+
+    // Fields after last ')': state ppid pgrp session tty_nr tpgid flags
+    //   minflt cminflt majflt cmajflt utime stime cutime cstime priority
+    //   nice num_threads itrealvalue starttime vsize rss ...
+    // Indices (0-based):  0:state 11:utime 12:stime 21:rss_pages
+    var it = std.mem.tokenizeScalar(u8, buf[last_paren + 2 ..], ' ');
+    var idx: usize = 0;
+    var utime_ticks: u64 = 0;
+    var stime_ticks: u64 = 0;
+    var rss_pages: u64 = 0;
+    while (it.next()) |field| : (idx += 1) {
+        switch (idx) {
+            11 => utime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
+            12 => stime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
+            21 => {
+                rss_pages = std.fmt.parseInt(u64, field, 10) catch 0;
+                break;
+            },
+            else => {},
+        }
+    }
+
+    const clk_tck_raw = sysconf(_SC_CLK_TCK);
+    const clk_tck: u64 = if (clk_tck_raw > 0) @intCast(clk_tck_raw) else 100;
+    const page_size_raw = sysconf(_SC_PAGESIZE);
+    const page_size: u64 = if (page_size_raw > 0) @intCast(page_size_raw) else 4096;
+
+    stats.cpu_user_us = (utime_ticks * 1_000_000) / clk_tck;
+    stats.cpu_sys_us = (stime_ticks * 1_000_000) / clk_tck;
+    stats.rss_bytes = rss_pages * page_size;
 }
 
 /// Ensure libtermux-exec.so is loaded on Termux/Android.

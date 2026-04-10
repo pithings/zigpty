@@ -79,11 +79,23 @@ pub const PtyError = error{
     TtynameFailed,
 };
 
+/// Process stats for a PTY's foreground process (Unix) or shell process (Windows).
+/// `cwd` is a slice into the caller-provided buffer — null on Windows (not tracked).
+/// CPU times are in microseconds. `rss_bytes` is resident set size.
+pub const Stats = struct {
+    pid: Pid,
+    cwd: ?[]const u8,
+    rss_bytes: u64,
+    cpu_user_us: u64,
+    cpu_sys_us: u64,
+};
+
 // Unix extern declarations and functions — only compiled on non-Windows
 pub const forkPty = if (!is_windows) forkPtyUnix else void;
 pub const openPty = if (!is_windows) openPtyUnix else void;
 pub const resize = if (!is_windows) resizeUnix else void;
 pub const getProcessName = if (!is_windows) getProcessNameUnix else void;
+pub const getStats = if (!is_windows) getStatsUnix else void;
 pub const waitForExit = if (!is_windows) waitForExitUnix else void;
 
 // --- Unix implementation (behind comptime guard) ---
@@ -199,6 +211,10 @@ fn resizeUnix(fd: std.posix.fd_t, cols: u16, rows: u16, x_pixel: u16, y_pixel: u
 
 fn getProcessNameUnix(fd: std.posix.fd_t, buf: []u8) ?[]const u8 {
     return platform.getProcessName(fd, buf);
+}
+
+fn getStatsUnix(fd: std.posix.fd_t, cwd_buf: []u8) ?Stats {
+    return platform.getStats(fd, cwd_buf);
 }
 
 fn waitForExitUnix(pid: std.posix.pid_t) ExitInfo {

@@ -1,10 +1,12 @@
 /// macOS-specific PTY helpers.
 const std = @import("std");
 const posix = std.posix;
+const lib = @import("lib.zig");
 
 extern fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern fn tcgetpgrp(fd: c_int) c_int;
 extern fn sysctl(name: [*]c_int, namelen: c_uint, oldp: ?*anyopaque, oldlenp: ?*usize, newp: ?*const anyopaque, newlen: usize) c_int;
+extern fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *anyopaque, buffersize: c_int) c_int;
 
 /// On macOS there is no execvpe — set environ pointer then execvp.
 pub fn execChild(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) void {
@@ -50,6 +52,55 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
 
     @memcpy(buf[0..len], comm[0..len]);
     return buf[0..len];
+}
+
+// proc_pidinfo flavors
+const PROC_PIDTASKINFO = 4;
+const PROC_PIDVNODEPATHINFO = 9;
+const PROC_TASKINFO_SIZE = 96;
+const PROC_VNODEPATHINFO_SIZE = 2352;
+// Offset of vnode_info_path.vip_path within proc_vnodepathinfo (start of pvi_cdir.vip_path).
+// Layout: vinfo_stat(136) + vi_type(4) + vi_pad(4) + fsid_t(8) = 152
+const VIP_PATH_OFFSET = 152;
+const MAXPATHLEN = 1024;
+
+/// Get stats for the PTY's foreground process group.
+pub fn getStats(fd: posix.fd_t, cwd_buf: []u8) ?lib.Stats {
+    const pgrp = tcgetpgrp(@intCast(fd));
+    if (pgrp < 0) return null;
+
+    var stats = lib.Stats{
+        .pid = pgrp,
+        .cwd = null,
+        .rss_bytes = 0,
+        .cpu_user_us = 0,
+        .cpu_sys_us = 0,
+    };
+
+    // PROC_PIDTASKINFO → virtual_size, resident_size, total_user (ns), total_system (ns)
+    var task_buf: [PROC_TASKINFO_SIZE]u8 align(8) = undefined;
+    const ti_rc = proc_pidinfo(pgrp, PROC_PIDTASKINFO, 0, &task_buf, PROC_TASKINFO_SIZE);
+    if (ti_rc == PROC_TASKINFO_SIZE) {
+        stats.rss_bytes = std.mem.readInt(u64, task_buf[8..16], .little);
+        const total_user_ns = std.mem.readInt(u64, task_buf[16..24], .little);
+        const total_sys_ns = std.mem.readInt(u64, task_buf[24..32], .little);
+        stats.cpu_user_us = total_user_ns / 1000;
+        stats.cpu_sys_us = total_sys_ns / 1000;
+    }
+
+    // PROC_PIDVNODEPATHINFO → cwd path at offset VIP_PATH_OFFSET (MAXPATHLEN bytes, null-terminated)
+    var vpi_buf: [PROC_VNODEPATHINFO_SIZE]u8 align(8) = undefined;
+    const vpi_rc = proc_pidinfo(pgrp, PROC_PIDVNODEPATHINFO, 0, &vpi_buf, PROC_VNODEPATHINFO_SIZE);
+    if (vpi_rc >= VIP_PATH_OFFSET + 1) {
+        const path_slice = vpi_buf[VIP_PATH_OFFSET..][0..MAXPATHLEN];
+        const len = std.mem.indexOfScalar(u8, path_slice, 0) orelse MAXPATHLEN;
+        if (len > 0 and len <= cwd_buf.len) {
+            @memcpy(cwd_buf[0..len], path_slice[0..len]);
+            stats.cwd = cwd_buf[0..len];
+        }
+    }
+
+    return stats;
 }
 
 /// Raw exit — bypasses libc's exit() and its atexit handlers.

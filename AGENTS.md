@@ -150,9 +150,10 @@ The pure Zig library (`lib.zig`) is exposed as the `"zigpty"` module in `build.z
 | `openPty`        | `(cols, rows) !OpenResult`                 | Open bare PTY pair                                          |
 | `resize`         | `(fd, cols, rows, x_pixel, y_pixel) !void` | Resize PTY (ioctl TIOCSWINSZ)                               |
 | `getProcessName` | `(fd, buf) ?[]const u8`                    | Foreground process name via /proc                           |
+| `getStats`       | `(fd, cwd_buf) ?Stats`                     | cwd + rss + cpu for foreground pgrp (Linux: /proc; macOS: proc_pidinfo) |
 | `waitForExit`    | `(pid) ExitInfo`                           | Blocking wait for child exit (call from background thread)  |
 
-Types: `ForkOptions`, `ForkResult`, `OpenResult`, `ExitInfo`, `PtyError`, `Fd`, `Pid`
+Types: `ForkOptions`, `ForkResult`, `OpenResult`, `ExitInfo`, `Stats`, `PtyError`, `Fd`, `Pid`
 
 ### Windows
 
@@ -169,8 +170,9 @@ Available via `lib.win` (re-exports `pty_windows.zig`):
 | `waitForExit`   | `(process) ExitInfo`                                  | Wait for process exit (blocking)         |
 | `killProcess`   | `(process, exit_code) void`                           | Terminate process                        |
 | `closePty`      | `(result) void`                                       | Close all ConPTY handles                 |
+| `getStats`      | `(process, cwd_buf) ?Stats`                           | rss + cpu via K32GetProcessMemoryInfo + GetProcessTimes (no cwd) |
 
-Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `ConPtyError`, `HPCON`, `HANDLE`
+Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `Stats`, `ConPtyError`, `HPCON`, `HANDLE`
 
 ## NAPI API (Zig → JS)
 
@@ -182,6 +184,7 @@ Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `ConPtyError`, `HPCON`, `HANDLE
 | `open`    | `(cols, rows)` → `{master, slave, pty}`                                         | `lib.openPty()`                          |
 | `resize`  | `(fd, cols, rows)` → void                                                       | `lib.resize()`                           |
 | `process` | `(fd)` → string                                                                 | `lib.getProcessName()`                   |
+| `stats`   | `(fd)` → `{pid, cwd, rssBytes, cpuUser, cpuSys}` \| undefined                   | `lib.getStats()` (foreground pgrp)       |
 
 ### Windows Exports
 
@@ -192,6 +195,7 @@ Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `ConPtyError`, `HPCON`, `HANDLE
 | `resize` | `(handle, cols, rows)` → void                                              | `win.resizeConsole()`                           |
 | `kill`   | `(handle)` → void                                                          | `win.killProcess()`                             |
 | `close`  | `(handle)` → void                                                          | `win.closePty()`                                |
+| `stats`  | `(handle)` → `{pid, cwd, rssBytes, cpuUser, cpuSys}` \| undefined          | `win.getStats()` (shell process, cwd always null) |
 
 Windows uses `napi_external` to wrap the `WinConPtyContext` handle. Data flows from a Zig read thread to JS via `napi_threadsafe_function` (onData callback).
 
@@ -222,6 +226,16 @@ pty.write("zigpty\n");
 ```
 
 Options: `{ timeout?: number }` (default: 30s). Throws on timeout.
+
+### `stats()`
+
+On-demand snapshot of OS-level process info for the PTY. Returns `{pid, cwd, rssBytes, cpuUser, cpuSys}` or `null`. CPU times are in microseconds, `rssBytes` is resident set size.
+
+- **Unix**: targets the PTY's foreground process group (same target as `pty.process`), so the numbers follow whatever the user is currently running. Linux reads `/proc/<pid>/{cwd,stat}`; macOS uses `proc_pidinfo(PROC_PIDTASKINFO)` + `proc_pidinfo(PROC_PIDVNODEPATHINFO)`.
+- **Windows**: reports the spawned shell process (no ConPTY foreground tracking). `rssBytes` via `K32GetProcessMemoryInfo`, CPU via `GetProcessTimes`. `cwd` is always `null` — reading another process's cwd requires `NtQueryInformationProcess` + remote PEB read, which is fragile across elevation boundaries.
+- **PipePty** (fallback): implemented in TypeScript on Linux only (reads `/proc/<child_pid>/{cwd,stat}`). Returns `null` on other platforms.
+
+No background thread — stats are pulled only when called. Returns `null` after close or when the process has exited.
 
 ### Terminal API (Bun-compatible)
 

@@ -18,12 +18,14 @@ pub const fork = if (!is_windows) unix_napi.fork else void;
 pub const open = if (!is_windows) unix_napi.open else void;
 pub const resize = if (!is_windows) unix_napi.resize else void;
 pub const getProcess = if (!is_windows) unix_napi.getProcess else void;
+pub const stats = if (!is_windows) unix_napi.stats else void;
 // Windows re-exports
 pub const winSpawn = if (is_windows) win_napi.spawn else void;
 pub const winWrite = if (is_windows) win_napi.write else void;
 pub const winResize = if (is_windows) win_napi.resize else void;
 pub const winKill = if (is_windows) win_napi.kill else void;
 pub const winClose = if (is_windows) win_napi.close else void;
+pub const winStats = if (is_windows) win_napi.stats else void;
 
 // --- Shared helpers (used by both platform modules) ---
 
@@ -75,4 +77,36 @@ pub fn returnUndef(env: napi.napi_env) napi.napi_value {
     var undef: napi.napi_value = undefined;
     _ = napi.napi_get_undefined(env, &undef);
     return undef;
+}
+
+/// Build a JS object from a `lib.Stats` struct.
+pub fn buildStatsObject(env: napi.napi_env, s: lib.Stats) !napi.napi_value {
+    var obj: napi.napi_value = undefined;
+    try napi.check(env, napi.napi_create_object(env, &obj));
+
+    var pid_val: napi.napi_value = undefined;
+    try napi.check(env, napi.napi_create_int32(env, @intCast(s.pid), &pid_val));
+    try napi.setProp(env, obj, "pid", pid_val);
+
+    if (s.cwd) |cwd| {
+        try napi.setProp(env, obj, "cwd", try napi.createString(env, cwd));
+    } else {
+        var null_val: napi.napi_value = undefined;
+        try napi.check(env, napi.napi_get_null(env, &null_val));
+        try napi.setProp(env, obj, "cwd", null_val);
+    }
+
+    var rss_val: napi.napi_value = undefined;
+    try napi.check(env, napi.napi_create_int64(env, @intCast(s.rss_bytes), &rss_val));
+    try napi.setProp(env, obj, "rssBytes", rss_val);
+
+    var cpu_user_val: napi.napi_value = undefined;
+    try napi.check(env, napi.napi_create_int64(env, @intCast(s.cpu_user_us), &cpu_user_val));
+    try napi.setProp(env, obj, "cpuUser", cpu_user_val);
+
+    var cpu_sys_val: napi.napi_value = undefined;
+    try napi.check(env, napi.napi_create_int64(env, @intCast(s.cpu_sys_us), &cpu_sys_val));
+    try napi.setProp(env, obj, "cpuSys", cpu_sys_val);
+
+    return obj;
 }

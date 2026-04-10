@@ -8,6 +8,19 @@ export interface IDisposable {
   dispose(): void;
 }
 
+export interface IPtyStats {
+  /** PID whose stats are reported. On Unix this is the foreground process group of the PTY; on Windows it's the spawned shell process. */
+  pid: number;
+  /** Current working directory. `null` when unavailable (always on Windows, or when the process has exited). */
+  cwd: string | null;
+  /** Resident set size (physical memory) in bytes. */
+  rssBytes: number;
+  /** Accumulated user-mode CPU time in microseconds. */
+  cpuUser: number;
+  /** Accumulated system-mode CPU time in microseconds. */
+  cpuSys: number;
+}
+
 export interface IPty {
   /** Process ID of the spawned process. */
   pid: number;
@@ -43,6 +56,8 @@ export interface IPty {
   close(): void;
   /** Wait until the output contains the given string. Resolves with all output collected so far. */
   waitFor(pattern: string, options?: { timeout?: number }): Promise<string>;
+  /** Snapshot OS-level stats (cwd, memory, CPU time) for the PTY's foreground process. Returns null when unavailable. */
+  stats(): IPtyStats | null;
 }
 
 export interface IPtyOpenOptions {

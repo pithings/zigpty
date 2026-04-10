@@ -5,7 +5,7 @@ import { native as _native } from "../napi.ts";
 import type { INativeUnix } from "../napi.ts";
 
 const native = _native as INativeUnix;
-import type { IPtyOptions } from "./types.ts";
+import type { IPtyOptions, IPtyStats } from "./types.ts";
 import { BasePty, DEFAULT_COLS, DEFAULT_ROWS, buildEnvPairs } from "./_base.ts";
 import { WriteQueue } from "./_writeQueue.ts";
 
@@ -91,6 +91,15 @@ export class UnixPty extends BasePty {
       return native.process(this._fd) ?? "";
     } catch {
       return "";
+    }
+  }
+
+  stats(): IPtyStats | null {
+    if (this._closed) return null;
+    try {
+      return native.stats(this._fd) ?? null;
+    } catch {
+      return null;
     }
   }
 

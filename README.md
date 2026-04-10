@@ -107,8 +107,28 @@ interface IPty {
   resume(): void;
   close(): void;
   waitFor(pattern: string, options?: { timeout?: number }): Promise<string>;
+  stats(): IPtyStats | null; // OS-level snapshot (cwd, memory, CPU time)
 }
 ```
+
+### `pty.stats()`
+
+Snapshot OS-level process info for the PTY's foreground process — `cwd`, resident memory, and accumulated CPU time. On Unix this tracks the foreground process group (same target as `pty.process`), so the numbers follow whatever the user is currently running. On Windows, stats are reported for the spawned shell process (no foreground tracking, no cwd).
+
+```ts
+const pty = spawn("/bin/bash");
+// …user types `cd /tmp && vim`…
+const s = pty.stats();
+// {
+//   pid: 4821,
+//   cwd: "/tmp",             // null on Windows
+//   rssBytes: 12_582_912,
+//   cpuUser: 18_340,         // microseconds
+//   cpuSys: 4_210,
+// }
+```
+
+Returns `null` when stats can't be read (process exited, PTY closed, or running in pipe fallback on non-Linux). Polling is on-demand — no background thread, no cost when unused.
 
 ### `pty.waitFor(pattern, options?)`
 

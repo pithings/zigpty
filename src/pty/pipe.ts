@@ -19,8 +19,9 @@
  *   - ^Z (SIGTSTP) is not translated — no controlling terminal to resume from
  */
 import { spawn as cpSpawn, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
 import * as os from "node:os";
-import type { IPtyOptions } from "./types.ts";
+import type { IPtyOptions, IPtyStats } from "./types.ts";
 import { BasePty, DEFAULT_COLS, DEFAULT_ROWS } from "./_base.ts";
 
 // Signal character → signal name mapping
@@ -177,6 +178,14 @@ export class PipePty extends BasePty {
 
   get process(): string {
     return this._file;
+  }
+
+  stats(): IPtyStats | null {
+    if (this._closed || this.pid <= 0) return null;
+    // Linux-only: read from /proc/<pid>/{cwd,stat}. Other platforms return null
+    // in fallback mode — no syscalls we can reach from pure TS.
+    if (os.platform() !== "linux") return null;
+    return readLinuxStats(this.pid);
   }
 
   write(data: string): void {
@@ -422,4 +431,43 @@ export class PipePty extends BasePty {
       listener(output);
     }
   }
+}
+
+let _clkTck: number | null = null;
+function getClkTck(): number {
+  if (_clkTck !== null) return _clkTck;
+  // Node exposes sysconf(_SC_CLK_TCK) via os.constants? No — fall back to common default.
+  // Reading from /proc/<pid>/stat is in clock ticks; Linux default is 100.
+  _clkTck = 100;
+  return _clkTck;
+}
+
+function readLinuxStats(pid: number): IPtyStats | null {
+  let cwd: string | null = null;
+  try {
+    cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+  } catch {}
+
+  let rssBytes = 0;
+  let cpuUser = 0;
+  let cpuSys = 0;
+  try {
+    const raw = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const lastParen = raw.lastIndexOf(")");
+    if (lastParen >= 0 && lastParen + 2 < raw.length) {
+      const fields = raw.slice(lastParen + 2).split(" ");
+      // Indices (0-based) after last ')': 11=utime, 12=stime, 21=rss_pages
+      const utime = Number(fields[11] ?? 0);
+      const stime = Number(fields[12] ?? 0);
+      const rssPages = Number(fields[21] ?? 0);
+      const clkTck = getClkTck();
+      cpuUser = Math.floor((utime * 1_000_000) / clkTck);
+      cpuSys = Math.floor((stime * 1_000_000) / clkTck);
+      rssBytes = rssPages * 4096;
+    }
+  } catch {
+    return null;
+  }
+
+  return { pid, cwd, rssBytes, cpuUser, cpuSys };
 }

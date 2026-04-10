@@ -12,12 +12,14 @@ fn init(env: napi.napi_env, exports: napi.napi_value) callconv(.c) napi.napi_val
         registerFn(env, exports, "resize", pty.winResize);
         registerFn(env, exports, "kill", pty.winKill);
         registerFn(env, exports, "close", pty.winClose);
+        registerFn(env, exports, "stats", pty.winStats);
     } else {
         // Unix PTY exports
         registerFn(env, exports, "fork", pty.fork);
         registerFn(env, exports, "open", pty.open);
         registerFn(env, exports, "resize", pty.resize);
         registerFn(env, exports, "process", pty.getProcess);
+        registerFn(env, exports, "stats", pty.stats);
     }
     return exports;
 }
