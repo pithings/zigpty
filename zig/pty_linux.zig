@@ -7,10 +7,6 @@ const lib = @import("lib.zig");
 extern fn execvpe(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
 extern fn ptsname_r(fd: c_int, buf: [*]u8, buflen: usize) c_int;
 extern fn tcgetpgrp(fd: c_int) c_int;
-extern fn sysconf(name: c_int) c_long;
-
-const _SC_CLK_TCK: c_int = 2;
-const _SC_PAGESIZE: c_int = 30;
 
 // musl dlopen flags (match glibc values)
 const RTLD_LAZY = 0x00001;
@@ -267,15 +263,50 @@ fn parseProcStat(buf: []const u8, stats: *lib.Stats) bool {
     }
     if (!reached_rss) return false;
 
-    const clk_tck_raw = sysconf(_SC_CLK_TCK);
-    const clk_tck: u64 = if (clk_tck_raw > 0) @intCast(clk_tck_raw) else 100;
-    const page_size_raw = sysconf(_SC_PAGESIZE);
-    const page_size: u64 = if (page_size_raw > 0) @intCast(page_size_raw) else 4096;
+    // USER_HZ is hard-coded to 100 on every Linux kernel — safer than sysconf(_SC_CLK_TCK)
+    // which has different SC constants across libcs (glibc/musl=2, Bionic=6), making
+    // Android musl builds read the wrong value.
+    const clk_tck: u64 = 100;
+    const page_size = getPageSize();
 
     stats.cpu_user_us = (utime_ticks * 1_000_000) / clk_tck;
     stats.cpu_sys_us = (stime_ticks * 1_000_000) / clk_tck;
     stats.rss_bytes = rss_pages * page_size;
     return true;
+}
+
+var cached_page_size: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
+
+/// Resolve page size via AT_PAGESZ in /proc/self/auxv. Avoids sysconf's SC-constant
+/// mismatch on Android and handles ARM64 16K pages correctly.
+fn getPageSize() u64 {
+    const cached = cached_page_size.load(.unordered);
+    if (cached != 0) return cached;
+
+    const size = parseAuxvPageSize() orelse 4096;
+    cached_page_size.store(size, .unordered);
+    return size;
+}
+
+fn parseAuxvPageSize() ?u64 {
+    const AT_NULL: usize = 0;
+    const AT_PAGESZ: usize = 6;
+
+    const f = std.fs.openFileAbsolute("/proc/self/auxv", .{}) catch return null;
+    defer f.close();
+
+    var buf: [1024]u8 = undefined;
+    const n = f.read(&buf) catch return null;
+
+    const entry_size = @sizeOf(usize) * 2;
+    var i: usize = 0;
+    while (i + entry_size <= n) : (i += entry_size) {
+        const key = std.mem.readInt(usize, buf[i..][0..@sizeOf(usize)], .little);
+        const val = std.mem.readInt(usize, buf[i + @sizeOf(usize) ..][0..@sizeOf(usize)], .little);
+        if (key == AT_NULL) return null;
+        if (key == AT_PAGESZ) return val;
+    }
+    return null;
 }
 
 /// Ensure libtermux-exec.so is loaded on Termux/Android.
