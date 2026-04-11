@@ -144,14 +144,14 @@ The native loader (`napi.ts`) tries glibc first, falls back to musl on Linux. On
 
 The pure Zig library (`lib.zig`) is exposed as the `"zigpty"` module in `build.zig`:
 
-| Function         | Signature                                  | Description                                                 |
-| ---------------- | ------------------------------------------ | ----------------------------------------------------------- |
-| `forkPty`        | `(ForkOptions) !ForkResult`                | Fork process with PTY (forkpty + signal handling + execvpe) |
-| `openPty`        | `(cols, rows) !OpenResult`                 | Open bare PTY pair                                          |
-| `resize`         | `(fd, cols, rows, x_pixel, y_pixel) !void` | Resize PTY (ioctl TIOCSWINSZ)                               |
-| `getProcessName` | `(fd, buf) ?[]const u8`                    | Foreground process name via /proc                           |
+| Function         | Signature                                  | Description                                                             |
+| ---------------- | ------------------------------------------ | ----------------------------------------------------------------------- |
+| `forkPty`        | `(ForkOptions) !ForkResult`                | Fork process with PTY (forkpty + signal handling + execvpe)             |
+| `openPty`        | `(cols, rows) !OpenResult`                 | Open bare PTY pair                                                      |
+| `resize`         | `(fd, cols, rows, x_pixel, y_pixel) !void` | Resize PTY (ioctl TIOCSWINSZ)                                           |
+| `getProcessName` | `(fd, buf) ?[]const u8`                    | Foreground process name via /proc                                       |
 | `getStats`       | `(fd, cwd_buf) ?Stats`                     | cwd + rss + cpu for foreground pgrp (Linux: /proc; macOS: proc_pidinfo) |
-| `waitForExit`    | `(pid) ExitInfo`                           | Blocking wait for child exit (call from background thread)  |
+| `waitForExit`    | `(pid) ExitInfo`                           | Blocking wait for child exit (call from background thread)              |
 
 Types: `ForkOptions`, `ForkResult`, `OpenResult`, `ExitInfo`, `Stats`, `PtyError`, `Fd`, `Pid`
 
@@ -159,17 +159,17 @@ Types: `ForkOptions`, `ForkResult`, `OpenResult`, `ExitInfo`, `Stats`, `PtyError
 
 Available via `lib.win` (re-exports `pty_windows.zig`):
 
-| Function        | Signature                                             | Description                              |
-| --------------- | ----------------------------------------------------- | ---------------------------------------- |
-| `createConPty`  | `(cols, rows) !ConPtySetup`                           | Phase 1: create pipes + pseudo console   |
-| `startProcess`  | `(hpc, cmd_line, env_block, cwd) !{process, pid}`     | Phase 2: spawn process in ConPTY         |
-| `spawnConPty`   | `(cmd_line, env_block, cwd, cols, rows) !SpawnResult` | Convenience: createConPty + startProcess |
-| `readOutput`    | `(conout, buf) usize`                                 | Read from output pipe (blocking)         |
-| `writeInput`    | `(conin, data) !void`                                 | Write to input pipe                      |
-| `resizeConsole` | `(hpc, cols, rows) !void`                             | Resize pseudo console                    |
-| `waitForExit`   | `(process) ExitInfo`                                  | Wait for process exit (blocking)         |
-| `killProcess`   | `(process, exit_code) void`                           | Terminate process                        |
-| `closePty`      | `(result) void`                                       | Close all ConPTY handles                 |
+| Function        | Signature                                             | Description                                                      |
+| --------------- | ----------------------------------------------------- | ---------------------------------------------------------------- |
+| `createConPty`  | `(cols, rows) !ConPtySetup`                           | Phase 1: create pipes + pseudo console                           |
+| `startProcess`  | `(hpc, cmd_line, env_block, cwd) !{process, pid}`     | Phase 2: spawn process in ConPTY                                 |
+| `spawnConPty`   | `(cmd_line, env_block, cwd, cols, rows) !SpawnResult` | Convenience: createConPty + startProcess                         |
+| `readOutput`    | `(conout, buf) usize`                                 | Read from output pipe (blocking)                                 |
+| `writeInput`    | `(conin, data) !void`                                 | Write to input pipe                                              |
+| `resizeConsole` | `(hpc, cols, rows) !void`                             | Resize pseudo console                                            |
+| `waitForExit`   | `(process) ExitInfo`                                  | Wait for process exit (blocking)                                 |
+| `killProcess`   | `(process, exit_code) void`                           | Terminate process                                                |
+| `closePty`      | `(result) void`                                       | Close all ConPTY handles                                         |
 | `getStats`      | `(process, pid) ?Stats`                               | rss + cpu via K32GetProcessMemoryInfo + GetProcessTimes (no cwd) |
 
 Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `Stats`, `ConPtyError`, `HPCON`, `HANDLE`
@@ -188,13 +188,13 @@ Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `Stats`, `ConPtyError`, `HPCON`
 
 ### Windows Exports
 
-| Export   | Signature                                                                  | Implementation                                  |
-| -------- | -------------------------------------------------------------------------- | ----------------------------------------------- |
-| `spawn`  | `(file, args[], env[], cwd, cols, rows, onData, onExit)` → `{pid, handle}` | `win.spawnConPty()` + read thread + exit thread |
-| `write`  | `(handle, data)` → void                                                    | `win.writeInput()`                              |
-| `resize` | `(handle, cols, rows)` → void                                              | `win.resizeConsole()`                           |
-| `kill`   | `(handle)` → void                                                          | `win.killProcess()`                             |
-| `close`  | `(handle)` → void                                                          | `win.closePty()`                                |
+| Export   | Signature                                                                  | Implementation                                    |
+| -------- | -------------------------------------------------------------------------- | ------------------------------------------------- |
+| `spawn`  | `(file, args[], env[], cwd, cols, rows, onData, onExit)` → `{pid, handle}` | `win.spawnConPty()` + read thread + exit thread   |
+| `write`  | `(handle, data)` → void                                                    | `win.writeInput()`                                |
+| `resize` | `(handle, cols, rows)` → void                                              | `win.resizeConsole()`                             |
+| `kill`   | `(handle)` → void                                                          | `win.killProcess()`                               |
+| `close`  | `(handle)` → void                                                          | `win.closePty()`                                  |
 | `stats`  | `(handle)` → `{pid, cwd, rssBytes, cpuUser, cpuSys}` \| undefined          | `win.getStats()` (shell process, cwd always null) |
 
 Windows uses `napi_external` to wrap the `WinConPtyContext` handle. Data flows from a Zig read thread to JS via `napi_threadsafe_function` (onData callback).

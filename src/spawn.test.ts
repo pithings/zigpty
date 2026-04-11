@@ -127,7 +127,11 @@ describe("spawn", () => {
   });
 });
 
-async function pollStats<T>(pty: { stats(): T | null }, predicate: (s: T) => boolean, timeoutMs = 5000): Promise<T> {
+async function pollStats<T>(
+  pty: { stats(): T | null },
+  predicate: (s: T) => boolean,
+  timeoutMs = 5000,
+): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const s = pty.stats();

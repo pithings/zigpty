@@ -433,7 +433,8 @@ export class PipePty extends BasePty {
   }
 }
 
-// CLK_TCK is 100 on all modern Linux kernels; native path uses sysconf for correctness.
+// USER_HZ is hard-coded to 100 on every Linux kernel — native path does the same
+// (see pty_linux.zig) to avoid sysconf's SC-constant mismatch on Android/Bionic.
 const CLK_TCK = 100;
 
 let _pageSize: number | null = null;
@@ -443,7 +444,9 @@ function getPageSize(): number {
   // Entries are stored in the target's native endianness.
   try {
     const auxv = fs.readFileSync("/proc/self/auxv");
-    const is64 = ["arm64", "x64", "ppc64", "s390x", "mips64el", "riscv64", "loong64"].includes(process.arch);
+    const is64 = ["arm64", "x64", "ppc64", "s390x", "mips64el", "riscv64", "loong64"].includes(
+      process.arch,
+    );
     const isLE = os.endianness() === "LE";
     const wordSize = is64 ? 8 : 4;
     const AT_PAGESZ = 6;
