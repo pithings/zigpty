@@ -2,6 +2,24 @@ import { createRequire } from "node:module";
 import { arch, platform } from "node:os";
 import { fileURLToPath } from "node:url";
 
+export interface INativeChildStats {
+  pid: number;
+  name: string;
+  rssBytes: number;
+  cpuUser: number;
+  cpuSys: number;
+}
+
+export interface INativeStats {
+  pid: number;
+  cwd: string | null;
+  rssBytes: number;
+  cpuUser: number;
+  cpuSys: number;
+  count: number;
+  children: INativeChildStats[];
+}
+
 export interface INativeUnix {
   fork(
     file: string,
@@ -21,6 +39,8 @@ export interface INativeUnix {
   resize(fd: number, cols: number, rows: number, xPixel?: number, yPixel?: number): void;
 
   process(fd: number): string | undefined;
+
+  stats(fd: number): INativeStats | undefined;
 }
 
 export interface INativeWindows {
@@ -42,6 +62,8 @@ export interface INativeWindows {
   kill(handle: object): void;
 
   close(handle: object): void;
+
+  stats(handle: object): INativeStats | undefined;
 }
 
 export type INative = INativeUnix | INativeWindows;

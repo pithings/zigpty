@@ -107,8 +107,36 @@ interface IPty {
   resume(): void;
   close(): void;
   waitFor(pattern: string, options?: { timeout?: number }): Promise<string>;
+  stats(): IPtyStats | null; // OS-level snapshot (cwd, memory, CPU time)
 }
 ```
+
+### `pty.stats()`
+
+Snapshot OS-level process info aggregated across the PTY's foreground job. `rssBytes`, `cpuUser`, and `cpuSys` are **totals** summed over the leader and every tracked child. `count` is how many processes were rolled into the totals. `children[]` lists each non-leader process (`{pid, name, rssBytes, cpuUser, cpuSys}`) so you can see the breakdown.
+
+On Unix, aggregation targets the PTY's foreground process group (same target as `pty.process`), so the numbers follow whatever the user is currently running — workers, subshells, build fan-outs. On Windows, the unit is the shell process's transitive descendant tree (ConPTY has no pgrp concept).
+
+```ts
+const pty = spawn("/bin/bash");
+// …user types `cd /tmp && cargo build`…
+const s = pty.stats();
+// {
+//   pid: 4821,               // leader (pgrp on Unix, shell on Windows)
+//   cwd: "/tmp",             // leader's cwd; null on Windows
+//   rssBytes: 2_147_483_648, // total across leader + children
+//   cpuUser: 8_430_000,      // microseconds
+//   cpuSys: 1_250_000,
+//   count: 17,               // leader + 16 workers
+//   children: [
+//     { pid: 4822, name: "cargo",   rssBytes: 128_000_000, cpuUser: 500_000, cpuSys: 80_000 },
+//     { pid: 4823, name: "rustc",   rssBytes: 512_000_000, cpuUser: 2_000_000, cpuSys: 300_000 },
+//     // …14 more…
+//   ],
+// }
+```
+
+Returns `null` when stats can't be read (process exited, PTY closed, or running in pipe fallback on non-Linux). Polling is on-demand — no background thread, no cost when unused.
 
 ### `pty.waitFor(pattern, options?)`
 

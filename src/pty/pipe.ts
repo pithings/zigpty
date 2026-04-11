@@ -19,8 +19,9 @@
  *   - ^Z (SIGTSTP) is not translated — no controlling terminal to resume from
  */
 import { spawn as cpSpawn, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
 import * as os from "node:os";
-import type { IPtyOptions } from "./types.ts";
+import type { IPtyOptions, IPtyStats } from "./types.ts";
 import { BasePty, DEFAULT_COLS, DEFAULT_ROWS } from "./_base.ts";
 
 // Signal character → signal name mapping
@@ -177,6 +178,14 @@ export class PipePty extends BasePty {
 
   get process(): string {
     return this._file;
+  }
+
+  stats(): IPtyStats | null {
+    if (this._closed || this.pid <= 0) return null;
+    // Linux-only: read from /proc/<pid>/{cwd,stat}. Other platforms return null
+    // in fallback mode — no syscalls we can reach from pure TS.
+    if (os.platform() !== "linux") return null;
+    return readLinuxStats(this.pid);
   }
 
   write(data: string): void {
@@ -422,4 +431,146 @@ export class PipePty extends BasePty {
       listener(output);
     }
   }
+}
+
+// USER_HZ is hard-coded to 100 on every Linux kernel — native path does the same
+// (see pty_linux.zig) to avoid sysconf's SC-constant mismatch on Android/Bionic.
+const CLK_TCK = 100;
+
+let _pageSize: number | null = null;
+function getPageSize(): number {
+  if (_pageSize !== null) return _pageSize;
+  // Parse AT_PAGESZ from /proc/self/auxv — needed for ARM64 Linux with 16K pages.
+  // Entries are stored in the target's native endianness.
+  try {
+    const auxv = fs.readFileSync("/proc/self/auxv");
+    const is64 = ["arm64", "x64", "ppc64", "s390x", "mips64el", "riscv64", "loong64"].includes(
+      process.arch,
+    );
+    const isLE = os.endianness() === "LE";
+    const wordSize = is64 ? 8 : 4;
+    const AT_PAGESZ = 6;
+    const AT_NULL = 0;
+    const readWord = (off: number): number => {
+      if (is64) {
+        const big = isLE ? auxv.readBigUInt64LE(off) : auxv.readBigUInt64BE(off);
+        return Number(big);
+      }
+      return isLE ? auxv.readUInt32LE(off) : auxv.readUInt32BE(off);
+    };
+    for (let i = 0; i + wordSize * 2 <= auxv.length; i += wordSize * 2) {
+      const key = readWord(i);
+      if (key === AT_NULL) break;
+      if (key === AT_PAGESZ) {
+        _pageSize = readWord(i + wordSize);
+        return _pageSize;
+      }
+    }
+  } catch {}
+  _pageSize = 4096;
+  return _pageSize;
+}
+
+/** Parsed /proc/<pid>/stat row used for aggregation. */
+interface ProcStatRow {
+  comm: string;
+  pgrp: number;
+  utimeTicks: number;
+  stimeTicks: number;
+  rssPages: number;
+}
+
+function parseProcStat(raw: string): ProcStatRow | null {
+  const firstParen = raw.indexOf("(");
+  const lastParen = raw.lastIndexOf(")");
+  if (firstParen < 0 || lastParen < 0 || lastParen <= firstParen || lastParen + 2 >= raw.length) {
+    return null;
+  }
+  const comm = raw.slice(firstParen + 1, lastParen);
+  const fields = raw.slice(lastParen + 2).split(" ");
+  // Indices after last ')': 2=pgrp, 11=utime, 12=stime, 21=rss_pages
+  const pgrp = Number(fields[2] ?? 0);
+  if (!Number.isFinite(pgrp)) return null;
+  return {
+    comm,
+    pgrp,
+    utimeTicks: Number(fields[11] ?? 0),
+    stimeTicks: Number(fields[12] ?? 0),
+    rssPages: Number(fields[21] ?? 0),
+  };
+}
+
+function readLinuxStats(pid: number): IPtyStats | null {
+  const pageSize = getPageSize();
+  // For shells spawned with `detached: true`, setsid() makes the leader its own
+  // pgrp, so walking /proc by pgrp aggregates the full job. For non-shell commands
+  // (no detached), the child inherits the parent's pgrp, so we always include the
+  // leader pid itself and additionally pick up siblings whose pgrp matches.
+  let leaderCwd: string | null = null;
+  try {
+    leaderCwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+  } catch {}
+
+  let procDir: string[];
+  try {
+    procDir = fs.readdirSync("/proc");
+  } catch {
+    return null;
+  }
+
+  let totalRss = 0;
+  let totalUser = 0;
+  let totalSys = 0;
+  let count = 0;
+  const children: {
+    pid: number;
+    name: string;
+    rssBytes: number;
+    cpuUser: number;
+    cpuSys: number;
+  }[] = [];
+
+  for (const entry of procDir) {
+    const entryPid = Number(entry);
+    if (!Number.isInteger(entryPid) || entryPid <= 0) continue;
+    let raw: string;
+    try {
+      raw = fs.readFileSync(`/proc/${entryPid}/stat`, "utf8");
+    } catch {
+      continue;
+    }
+    const row = parseProcStat(raw);
+    if (!row) continue;
+    if (entryPid !== pid && row.pgrp !== pid) continue;
+
+    const rssBytes = row.rssPages * pageSize;
+    const cpuUser = Math.floor((row.utimeTicks * 1_000_000) / CLK_TCK);
+    const cpuSys = Math.floor((row.stimeTicks * 1_000_000) / CLK_TCK);
+    totalRss += rssBytes;
+    totalUser += cpuUser;
+    totalSys += cpuSys;
+    count += 1;
+
+    if (entryPid !== pid) {
+      children.push({
+        pid: entryPid,
+        name: row.comm.slice(0, 31),
+        rssBytes,
+        cpuUser,
+        cpuSys,
+      });
+    }
+  }
+
+  if (count === 0) return null;
+
+  return {
+    pid,
+    cwd: leaderCwd,
+    rssBytes: totalRss,
+    cpuUser: totalUser,
+    cpuSys: totalSys,
+    count,
+    children,
+  };
 }

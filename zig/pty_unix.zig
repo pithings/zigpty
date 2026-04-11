@@ -249,3 +249,25 @@ fn getProcessImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_
 
     return try napi.createString(env, name);
 }
+
+/// stats(fd) → { pid, cwd, rssBytes, cpuUser, cpuSys } | undefined
+pub fn stats(env: napi.napi_env, info: napi.napi_callback_info) callconv(.c) napi.napi_value {
+    return statsImpl(env, info) catch return pty.returnUndef(env);
+}
+
+fn statsImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value {
+    var argc: usize = 1;
+    var argv: [1]napi.napi_value = undefined;
+    try napi.check(env, napi.napi_get_cb_info(env, info, &argc, &argv, null, null));
+
+    var fd_i32: i32 = 0;
+    try napi.check(env, napi.napi_get_value_int32(env, argv[0], &fd_i32));
+
+    if (fd_i32 < 0) return pty.returnUndef(env);
+
+    var cwd_buf: [4096]u8 = undefined;
+    var s = lib.getStats(@intCast(fd_i32), alloc, &cwd_buf) orelse return pty.returnUndef(env);
+    defer s.deinit(alloc);
+
+    return try pty.buildStatsObject(env, s);
+}

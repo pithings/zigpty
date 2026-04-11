@@ -127,6 +127,81 @@ describe("spawn", () => {
   });
 });
 
+async function pollStats<T>(
+  pty: { stats(): T | null },
+  predicate: (s: T) => boolean,
+  timeoutMs = 5000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const s = pty.stats();
+    if (s !== null && predicate(s)) return s;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error("pollStats timed out");
+}
+
+describe("stats", () => {
+  it("should report pid, rss, and cpu times", async () => {
+    const exe = isWindows ? "cmd.exe" : "/bin/cat";
+    const pty = spawn(exe);
+
+    const stats = await pollStats(pty, (s) => s.pid > 0 && s.rssBytes > 0);
+    expect(stats.cpuUser).toBeGreaterThanOrEqual(0);
+    expect(stats.cpuSys).toBeGreaterThanOrEqual(0);
+
+    pty.kill();
+    await pty.exited;
+  });
+
+  it.skipIf(isWindows)("should report cwd on unix", async () => {
+    // macOS resolves /tmp → /private/tmp; pass the canonical path so proc_pidinfo's
+    // PROC_PIDVNODEPATHINFO returns an equal string.
+    const tmpDir = process.platform === "darwin" ? "/private/tmp" : "/tmp";
+    const pty = spawn("/bin/cat", [], { cwd: tmpDir });
+
+    const stats = await pollStats(pty, (s) => s.cwd === tmpDir);
+    expect(stats.cwd).toBe(tmpDir);
+
+    pty.kill();
+    await pty.exited;
+  });
+
+  it("should return null after close", async () => {
+    const exe = isWindows ? "cmd.exe" : "/bin/cat";
+    const pty = spawn(exe);
+    pty.close();
+    expect(pty.stats()).toBeNull();
+    await pty.exited;
+  });
+
+  it("should aggregate child processes", async () => {
+    // Unix: sh runs two `sleep` children in a single pgrp — aggregation should
+    // see count=3 (sh + 2 sleeps).
+    // Windows: cmd uses `start /B` to actually background two pings in its
+    // descendant tree (cmd's `&` is sequential, not parallel).
+    const [exe, args] = isWindows
+      ? [
+          "cmd.exe",
+          ["/c", "start /B ping -n 10 127.0.0.1 && start /B ping -n 10 127.0.0.1 && timeout /t 10"],
+        ]
+      : ["/bin/sh", ["-c", "sleep 2 & sleep 2 & wait"]];
+    const pty = spawn(exe, args);
+
+    const stats = await pollStats(pty, (s) => s.count >= 3 && s.children.length >= 2);
+    expect(stats.count).toBeGreaterThanOrEqual(3);
+    expect(stats.children.length).toBeGreaterThanOrEqual(2);
+    for (const c of stats.children) {
+      expect(c.pid).toBeGreaterThan(0);
+      expect(typeof c.name).toBe("string");
+      expect(c.rssBytes).toBeGreaterThanOrEqual(0);
+    }
+
+    pty.kill();
+    await pty.exited;
+  });
+});
+
 describeUnix("process name (unix)", () => {
   it("should report foreground process name", async () => {
     const pty = spawn("/bin/bash");

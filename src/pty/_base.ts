@@ -1,4 +1,4 @@
-import type { IDisposable, IEvent, IPty, IPtyOptions } from "./types.ts";
+import type { IDisposable, IEvent, IPty, IPtyOptions, IPtyStats } from "./types.ts";
 import { Terminal } from "../terminal.ts";
 import type { TerminalOptions } from "../terminal.ts";
 
@@ -143,6 +143,7 @@ export abstract class BasePty implements IPty {
   abstract pause(): void;
   abstract resume(): void;
   abstract close(): void;
+  abstract stats(): IPtyStats | null;
 }
 
 export function buildEnvPairs(

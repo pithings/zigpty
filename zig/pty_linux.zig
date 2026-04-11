@@ -1,7 +1,9 @@
 /// Linux-specific PTY helpers.
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
+const lib = @import("lib.zig");
 
 extern fn execvpe(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
 extern fn ptsname_r(fd: c_int, buf: [*]u8, buflen: usize) c_int;
@@ -183,6 +185,187 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
 
     const cmd = std.mem.sliceTo(buf[0..bytes_read], 0);
     return if (std.mem.lastIndexOfScalar(u8, cmd, '/')) |p| cmd[p + 1 ..] else cmd;
+}
+
+/// Parsed fields from /proc/<pid>/stat.
+const ProcStat = struct {
+    pgrp: posix.pid_t,
+    comm: []const u8, // slice into source buffer
+    utime_ticks: u64,
+    stime_ticks: u64,
+    rss_pages: u64,
+};
+
+/// Get aggregated stats for the PTY's foreground process group.
+/// Walks /proc and sums rss+cpu across every process whose pgrp matches
+/// `tcgetpgrp(fd)`. The leader is the pgrp id itself. `children` (owned by
+/// `allocator`) lists every other process in the pgrp.
+pub fn getStats(fd: posix.fd_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?lib.Stats {
+    const pgrp = tcgetpgrp(@intCast(fd));
+    if (pgrp < 0) return null;
+
+    const clk_tck: u64 = 100;
+    const page_size = getPageSize();
+
+    var children = std.ArrayListUnmanaged(lib.ChildStats){};
+    errdefer children.deinit(allocator);
+
+    var total_rss: u64 = 0;
+    var total_user: u64 = 0;
+    var total_sys: u64 = 0;
+    var count: u32 = 0;
+    var leader_cwd: ?[]const u8 = null;
+
+    // Resolve leader cwd first — this is the one field that still refers only
+    // to the foreground pgrp leader.
+    var path_buf: [64]u8 = undefined;
+    if (std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pgrp})) |cwd_path| {
+        if (std.posix.readlink(cwd_path, cwd_buf)) |link| {
+            if (link.len > 0) leader_cwd = link;
+        } else |_| {}
+    } else |_| {}
+
+    var dir = std.fs.openDirAbsolute("/proc", .{ .iterate = true }) catch return null;
+    defer dir.close();
+
+    var it = dir.iterate();
+    while (true) {
+        const entry = (it.next() catch break) orelse break;
+        // Don't filter by entry.kind — procfs can return .unknown depending on
+        // the kernel/mount. parseInt on the name is enough to skip non-pid dirs.
+        const pid = std.fmt.parseInt(posix.pid_t, entry.name, 10) catch continue;
+
+        const stat_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch continue;
+        const f = std.fs.openFileAbsolute(stat_path, .{}) catch continue;
+        defer f.close();
+
+        var stat_buf: [1024]u8 = undefined;
+        const n = f.read(&stat_buf) catch continue;
+        if (n == 0) continue;
+
+        const ps = parseProcStat(stat_buf[0..n]) orelse continue;
+        if (ps.pgrp != pgrp) continue;
+
+        const rss_bytes = ps.rss_pages * page_size;
+        const cpu_user_us = (ps.utime_ticks * 1_000_000) / clk_tck;
+        const cpu_sys_us = (ps.stime_ticks * 1_000_000) / clk_tck;
+
+        if (pid == pgrp) {
+            total_rss += rss_bytes;
+            total_user += cpu_user_us;
+            total_sys += cpu_sys_us;
+            count += 1;
+        } else {
+            var child = lib.ChildStats{
+                .pid = pid,
+                .name = undefined,
+                .name_len = 0,
+                .rss_bytes = rss_bytes,
+                .cpu_user_us = cpu_user_us,
+                .cpu_sys_us = cpu_sys_us,
+            };
+            const nl = @min(ps.comm.len, child.name.len);
+            if (nl > 0) @memcpy(child.name[0..nl], ps.comm[0..nl]);
+            child.name_len = @intCast(nl);
+            children.append(allocator, child) catch continue;
+            total_rss += rss_bytes;
+            total_user += cpu_user_us;
+            total_sys += cpu_sys_us;
+            count += 1;
+        }
+    }
+
+    if (count == 0) {
+        children.deinit(allocator);
+        return null;
+    }
+
+    const owned = children.toOwnedSlice(allocator) catch blk: {
+        children.deinit(allocator);
+        break :blk &[_]lib.ChildStats{};
+    };
+    return lib.Stats{
+        .pid = pgrp,
+        .cwd = leader_cwd,
+        .rss_bytes = total_rss,
+        .cpu_user_us = total_user,
+        .cpu_sys_us = total_sys,
+        .count = count,
+        .children = owned,
+    };
+}
+
+/// Parse /proc/<pid>/stat. Format: `pid (comm) state ppid pgrp ...`
+/// comm can contain spaces/parens, so we skip to the LAST ')' then count fields.
+fn parseProcStat(buf: []const u8) ?ProcStat {
+    const first_paren = std.mem.indexOfScalar(u8, buf, '(') orelse return null;
+    const last_paren = std.mem.lastIndexOfScalar(u8, buf, ')') orelse return null;
+    if (last_paren <= first_paren or last_paren + 2 >= buf.len) return null;
+
+    const comm = buf[first_paren + 1 .. last_paren];
+
+    // Fields after last ')': state(0) ppid(1) pgrp(2) session(3) tty_nr(4)
+    //   tpgid(5) flags(6) minflt(7) cminflt(8) majflt(9) cmajflt(10)
+    //   utime(11) stime(12) cutime(13) cstime(14) priority(15) nice(16)
+    //   num_threads(17) itrealvalue(18) starttime(19) vsize(20) rss(21)
+    var it = std.mem.tokenizeScalar(u8, buf[last_paren + 2 ..], ' ');
+    var idx: usize = 0;
+    var result = ProcStat{
+        .pgrp = -1,
+        .comm = comm,
+        .utime_ticks = 0,
+        .stime_ticks = 0,
+        .rss_pages = 0,
+    };
+    while (it.next()) |field| : (idx += 1) {
+        switch (idx) {
+            2 => result.pgrp = std.fmt.parseInt(posix.pid_t, field, 10) catch return null,
+            11 => result.utime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
+            12 => result.stime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
+            21 => {
+                result.rss_pages = std.fmt.parseInt(u64, field, 10) catch return null;
+                return result;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+var cached_page_size: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
+
+/// Resolve page size via AT_PAGESZ in /proc/self/auxv. Avoids sysconf's SC-constant
+/// mismatch on Android and handles ARM64 16K pages correctly.
+fn getPageSize() u64 {
+    const cached = cached_page_size.load(.unordered);
+    if (cached != 0) return cached;
+
+    const size = parseAuxvPageSize() orelse 4096;
+    cached_page_size.store(size, .unordered);
+    return size;
+}
+
+fn parseAuxvPageSize() ?u64 {
+    const AT_NULL: usize = 0;
+    const AT_PAGESZ: usize = 6;
+
+    const f = std.fs.openFileAbsolute("/proc/self/auxv", .{}) catch return null;
+    defer f.close();
+
+    var buf: [1024]u8 = undefined;
+    const n = f.read(&buf) catch return null;
+
+    // auxv entries are stored in the target's native endianness, not a fixed one.
+    const endian = builtin.cpu.arch.endian();
+    const entry_size = @sizeOf(usize) * 2;
+    var i: usize = 0;
+    while (i + entry_size <= n) : (i += entry_size) {
+        const key = std.mem.readInt(usize, buf[i..][0..@sizeOf(usize)], endian);
+        const val = std.mem.readInt(usize, buf[i + @sizeOf(usize) ..][0..@sizeOf(usize)], endian);
+        if (key == AT_NULL) return null;
+        if (key == AT_PAGESZ) return val;
+    }
+    return null;
 }
 
 /// Ensure libtermux-exec.so is loaded on Termux/Android.

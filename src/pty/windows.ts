@@ -1,5 +1,5 @@
 import type { INativeWindows } from "../napi.ts";
-import type { IPtyOptions } from "./types.ts";
+import type { IPtyOptions, IPtyStats } from "./types.ts";
 import { BasePty, DEFAULT_COLS, DEFAULT_ROWS, buildEnvPairs } from "./_base.ts";
 
 export class WindowsPty extends BasePty {
@@ -69,6 +69,15 @@ export class WindowsPty extends BasePty {
 
   get process(): string {
     return this._file;
+  }
+
+  stats(): IPtyStats | null {
+    if (this._closed) return null;
+    try {
+      return this._native.stats(this._handle) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   write(data: string): void {

@@ -377,6 +377,28 @@ fn killImpl(env: napi.napi_env, info: napi.napi_callback_info) !void {
     win.killProcess(ctx.spawn_result.process, 1);
 }
 
+/// stats(handle) → { pid, cwd, rssBytes, cpuUser, cpuSys } | undefined
+pub fn stats(env: napi.napi_env, info: napi.napi_callback_info) callconv(.c) napi.napi_value {
+    return statsImpl(env, info) catch return pty.returnUndef(env);
+}
+
+fn statsImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value {
+    var argc: usize = 1;
+    var argv: [1]napi.napi_value = undefined;
+    try napi.check(env, napi.napi_get_cb_info(env, info, &argc, &argv, null, null));
+
+    var ctx_ptr: ?*anyopaque = null;
+    try napi.check(env, napi.napi_get_value_external(env, argv[0], &ctx_ptr));
+    const ctx: *WinConPtyContext = @ptrCast(@alignCast(ctx_ptr orelse return pty.returnUndef(env)));
+
+    if (ctx.spawn_result.process == win.INVALID_HANDLE) return pty.returnUndef(env);
+
+    var s = win.getStats(ctx.spawn_result.process, ctx.spawn_result.pid, alloc) orelse return pty.returnUndef(env);
+    defer s.deinit(alloc);
+
+    return try pty.buildStatsObject(env, s);
+}
+
 /// close(handle) — cleanup ConPTY resources
 pub fn close(env: napi.napi_env, info: napi.napi_callback_info) callconv(.c) napi.napi_value {
     closeImpl(env, info) catch {};
