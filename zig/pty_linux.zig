@@ -1,5 +1,6 @@
 /// Linux-specific PTY helpers.
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 const lib = @import("lib.zig");
@@ -254,7 +255,7 @@ fn parseProcStat(buf: []const u8, stats: *lib.Stats) bool {
             11 => utime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
             12 => stime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
             21 => {
-                rss_pages = std.fmt.parseInt(u64, field, 10) catch 0;
+                rss_pages = std.fmt.parseInt(u64, field, 10) catch return false;
                 reached_rss = true;
                 break;
             },
@@ -298,11 +299,13 @@ fn parseAuxvPageSize() ?u64 {
     var buf: [1024]u8 = undefined;
     const n = f.read(&buf) catch return null;
 
+    // auxv entries are stored in the target's native endianness, not a fixed one.
+    const endian = builtin.cpu.arch.endian();
     const entry_size = @sizeOf(usize) * 2;
     var i: usize = 0;
     while (i + entry_size <= n) : (i += entry_size) {
-        const key = std.mem.readInt(usize, buf[i..][0..@sizeOf(usize)], .little);
-        const val = std.mem.readInt(usize, buf[i + @sizeOf(usize) ..][0..@sizeOf(usize)], .little);
+        const key = std.mem.readInt(usize, buf[i..][0..@sizeOf(usize)], endian);
+        const val = std.mem.readInt(usize, buf[i + @sizeOf(usize) ..][0..@sizeOf(usize)], endian);
         if (key == AT_NULL) return null;
         if (key == AT_PAGESZ) return val;
     }

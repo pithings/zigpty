@@ -531,6 +531,45 @@ describeUnix("PipePty: process name", () => {
   });
 });
 
+const isLinux = platform() === "linux";
+const describeLinux = isLinux ? describe : describe.skip;
+
+describeLinux("PipePty: stats (linux fallback)", () => {
+  it("should report pid, cwd, rss, and cpu times", async () => {
+    const pty = new PipePty("/bin/cat", [], { cwd: "/tmp" });
+
+    // Stats are read on-demand via /proc/<pid>/{cwd,stat} — give cat a moment to start.
+    await new Promise((r) => setTimeout(r, 50));
+
+    const stats = pty.stats();
+    expect(stats).not.toBeNull();
+    expect(stats!.pid).toBe(pty.pid);
+    expect(stats!.cwd).toBe("/tmp");
+    expect(stats!.rssBytes).toBeGreaterThan(0);
+    expect(stats!.cpuUser).toBeGreaterThanOrEqual(0);
+    expect(stats!.cpuSys).toBeGreaterThanOrEqual(0);
+
+    pty.kill("SIGTERM");
+  });
+
+  it("should return null after close", () => {
+    const pty = new PipePty("/bin/cat", []);
+    pty.close();
+    expect(pty.stats()).toBeNull();
+  });
+});
+
+const describeNonLinux = isLinux ? describe.skip : describe;
+
+describeNonLinux("PipePty: stats (non-linux fallback)", () => {
+  it("should return null on non-linux platforms", () => {
+    const cmd = isWindows ? ["/c", "ping -n 2 127.0.0.1"] : ["-c", "sleep 1"];
+    const pty = new PipePty(shell, cmd);
+    expect(pty.stats()).toBeNull();
+    pty.close();
+  });
+});
+
 describe("PipePty: error handling", () => {
   it("should handle spawn failure gracefully", async () => {
     const pty = new PipePty("/nonexistent/binary", []);

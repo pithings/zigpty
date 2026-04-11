@@ -440,17 +440,26 @@ let _pageSize: number | null = null;
 function getPageSize(): number {
   if (_pageSize !== null) return _pageSize;
   // Parse AT_PAGESZ from /proc/self/auxv — needed for ARM64 Linux with 16K pages.
+  // Entries are stored in the target's native endianness.
   try {
     const auxv = fs.readFileSync("/proc/self/auxv");
     const is64 = ["arm64", "x64", "ppc64", "s390x", "mips64el", "riscv64", "loong64"].includes(process.arch);
+    const isLE = os.endianness() === "LE";
     const wordSize = is64 ? 8 : 4;
     const AT_PAGESZ = 6;
     const AT_NULL = 0;
+    const readWord = (off: number): number => {
+      if (is64) {
+        const big = isLE ? auxv.readBigUInt64LE(off) : auxv.readBigUInt64BE(off);
+        return Number(big);
+      }
+      return isLE ? auxv.readUInt32LE(off) : auxv.readUInt32BE(off);
+    };
     for (let i = 0; i + wordSize * 2 <= auxv.length; i += wordSize * 2) {
-      const key = is64 ? Number(auxv.readBigUInt64LE(i)) : auxv.readUInt32LE(i);
+      const key = readWord(i);
       if (key === AT_NULL) break;
       if (key === AT_PAGESZ) {
-        _pageSize = is64 ? Number(auxv.readBigUInt64LE(i + 8)) : auxv.readUInt32LE(i + 4);
+        _pageSize = readWord(i + wordSize);
         return _pageSize;
       }
     }

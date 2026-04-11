@@ -104,10 +104,11 @@ pub fn getStats(fd: posix.fd_t, cwd_buf: []u8) ?lib.Stats {
         any_field = true;
     }
 
-    // PROC_PIDVNODEPATHINFO → cwd path at offset VIP_PATH_OFFSET (MAXPATHLEN bytes, null-terminated)
+    // PROC_PIDVNODEPATHINFO → cwd path at offset VIP_PATH_OFFSET (MAXPATHLEN bytes, null-terminated).
+    // proc_pidinfo returns the full struct size on success or -1 on error — no partial fills.
     var vpi_buf: [PROC_VNODEPATHINFO_SIZE]u8 align(8) = undefined;
     const vpi_rc = proc_pidinfo(pgrp, PROC_PIDVNODEPATHINFO, 0, &vpi_buf, PROC_VNODEPATHINFO_SIZE);
-    if (vpi_rc >= VIP_PATH_OFFSET + 1) {
+    if (vpi_rc == PROC_VNODEPATHINFO_SIZE) {
         const path_slice = vpi_buf[VIP_PATH_OFFSET..][0..MAXPATHLEN];
         const len = std.mem.indexOfScalar(u8, path_slice, 0) orelse MAXPATHLEN;
         if (len > 0 and len <= cwd_buf.len) {
