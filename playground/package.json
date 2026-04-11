@@ -1,0 +1,16 @@
+{
+  "name": "zigpty-playground",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "nitro build",
+    "dev": "nitro dev",
+    "preview": "nitro preview"
+  },
+  "dependencies": {
+    "zigpty": "file:.."
+  },
+  "devDependencies": {
+    "nitro": "latest"
+  }
+}

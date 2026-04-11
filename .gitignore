@@ -6,4 +6,3 @@ prebuilds
 coverage
 .zig-cache
 *.o
-playground*

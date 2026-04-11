@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>> zigpty</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #000;
+      }
+      #terminal {
+        position: fixed;
+        inset: 0;
+        height: 100%;
+        width: 100%;
+      }
+      #stats {
+        position: fixed;
+        bottom: 8px;
+        right: 12px;
+        z-index: 10;
+        padding: 6px 10px;
+        font:
+          11px/1.4 Menlo,
+          Monaco,
+          "Cascadia Mono",
+          monospace;
+        color: #cfcfcf;
+        background: rgba(20, 20, 20, 0.7);
+        border: 1px solid #333;
+        border-radius: 4px;
+        pointer-events: none;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="terminal"></div>
+    <div id="stats">connecting…</div>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-clipboard@0.1.0/lib/addon-clipboard.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-search@0.15.0/lib/addon-search.js"></script>
+    <script>
+      const term = new Terminal({
+        cursorBlink: true,
+        fontFamily: 'Menlo, Monaco, "Cascadia Mono", "Courier New", monospace',
+        fontSize: 13,
+        theme: { background: "#000000" },
+      });
+      const fit = new FitAddon.FitAddon();
+      const search = new SearchAddon.SearchAddon();
+      term.loadAddon(fit);
+      term.loadAddon(new WebLinksAddon.WebLinksAddon());
+      term.loadAddon(new ClipboardAddon.ClipboardAddon());
+      term.loadAddon(search);
+      term.open(document.getElementById("terminal"));
+      try {
+        term.loadAddon(new WebglAddon.WebglAddon());
+      } catch {}
+      fit.fit();
+
+      window.addEventListener("keydown", (e) => {
+        const mod = e.metaKey || e.ctrlKey;
+        if (mod && e.key === "f") {
+          e.preventDefault();
+          const q = prompt("search");
+          if (q) search.findNext(q);
+        }
+      });
+
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(
+        `${proto}://${location.host}/terminal?cols=${term.cols}&rows=${term.rows}`,
+      );
+      ws.binaryType = "arraybuffer";
+
+      const statsEl = document.getElementById("stats");
+      const fmtBytes = (n) => {
+        if (n < 1024) return `${n} B`;
+        if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+        if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+        return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+      };
+      const fmtCpu = (us) => `${(us / 1000).toFixed(0)} ms`;
+
+      const renderStats = (s) => {
+        const lines = [
+          `pid    ${s.pid}`,
+          `procs  ${s.count}`,
+          `rss    ${fmtBytes(s.rssBytes)}`,
+          `cpu    ${fmtCpu(s.cpuUser)} u / ${fmtCpu(s.cpuSys)} s`,
+        ];
+        if (s.cwd) lines.push(`cwd    ${s.cwd}`);
+        if (s.children && s.children.length) {
+          lines.push("");
+          lines.push("children");
+          for (const c of s.children) {
+            const name = (c.name || "?").padEnd(16).slice(0, 16);
+            lines.push(
+              `  ${String(c.pid).padStart(6)} ${name} ${fmtBytes(c.rssBytes).padStart(9)}`,
+            );
+          }
+        }
+        statsEl.textContent = lines.join("\n");
+      };
+
+      ws.addEventListener("open", () => {
+        term.focus();
+        statsEl.textContent = "waiting for stats…";
+      });
+      ws.addEventListener("message", (ev) => {
+        if (typeof ev.data === "string") {
+          if (ev.data.startsWith("{")) {
+            try {
+              const msg = JSON.parse(ev.data);
+              if (msg.type === "stats") {
+                renderStats(msg.stats);
+                return;
+              }
+            } catch {}
+          }
+          term.write(ev.data);
+          return;
+        }
+        term.write(new Uint8Array(ev.data));
+      });
+      ws.addEventListener("close", () => {
+        term.writeln("\r\n[connection closed]");
+        statsEl.textContent = "disconnected";
+      });
+
+      term.onData((data) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(data);
+      });
+
+      term.onResize(({ cols, rows }) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "resize", cols, rows }));
+        }
+      });
+      window.addEventListener("resize", () => fit.fit());
+    </script>
+  </body>
+</html>

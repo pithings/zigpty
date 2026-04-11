@@ -2,6 +2,9 @@
   "name": "zigpty",
   "version": "0.1.5",
   "repository": "pithings/zigpty",
+  "workspaces": [
+    "playground"
+  ],
   "files": [
     "dist",
     "prebuilds"
