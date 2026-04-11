@@ -10,6 +10,41 @@ extern fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *anyopaque, 
 extern fn proc_listpids(type: u32, typeinfo: u32, buffer: ?*anyopaque, buffersize: c_int) c_int;
 extern fn proc_name(pid: c_int, buffer: *anyopaque, buffersize: u32) c_int;
 
+const MachTimebaseInfo = extern struct { numer: u32, denom: u32 };
+extern fn mach_timebase_info(info: *MachTimebaseInfo) c_int;
+
+/// Cached `mach_timebase_info`. On Apple Silicon `mach_absolute_time` runs at
+/// 24 MHz (numer=125, denom=3 → 41.667 ns/tick); on Intel macs the timebase is
+/// 1:1 ns/tick. Cached lazily — `mach_timebase_info` is a syscall on first call.
+var cached_timebase: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
+
+fn machTimebase() MachTimebaseInfo {
+    const packed_val = cached_timebase.load(.unordered);
+    if (packed_val != 0) {
+        return .{
+            .numer = @truncate(packed_val >> 32),
+            .denom = @truncate(packed_val),
+        };
+    }
+    var info: MachTimebaseInfo = .{ .numer = 1, .denom = 1 };
+    _ = mach_timebase_info(&info);
+    if (info.denom == 0) info = .{ .numer = 1, .denom = 1 };
+    cached_timebase.store((@as(u64, info.numer) << 32) | @as(u64, info.denom), .unordered);
+    return info;
+}
+
+/// Convert raw `pti_total_user`/`pti_total_system` (mach absolute time units)
+/// to microseconds: µs = ticks * numer / (denom * 1000).
+fn machTicksToMicros(ticks: u64) u64 {
+    const tb = machTimebase();
+    // Compute as u128 to avoid overflow on Intel (numer=denom=1, ticks already
+    // ns) when ticks approach u64 max. Apple Silicon's numer=125 keeps the
+    // intermediate well within u128 range for any realistic CPU time.
+    const num: u128 = @as(u128, ticks) * @as(u128, tb.numer);
+    const den: u128 = @as(u128, tb.denom) * 1000;
+    return @intCast(num / den);
+}
+
 /// On macOS there is no execvpe — set environ pointer then execvp.
 pub fn execChild(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) void {
     // environ is char**, we cast our const env pointer to match
@@ -63,9 +98,14 @@ const PROC_PIDVNODEPATHINFO = 9;
 // struct proc_taskinfo layout — total size 96 bytes:
 //   [ 0..  8) pti_virtual_size       u64
 //   [ 8.. 16) pti_resident_size      u64  ← used for rss
-//   [16.. 24) pti_total_user         u64  (nanoseconds)
-//   [24.. 32) pti_total_system       u64  (nanoseconds)
+//   [16.. 24) pti_total_user         u64  (mach absolute time units)
+//   [24.. 32) pti_total_system       u64  (mach absolute time units)
 //   [32.. 96) thread/page/fault counters (unused)
+//
+// Note: pti_total_user/pti_total_system are in mach absolute time units, NOT
+// nanoseconds. On Apple Silicon mach_absolute_time runs at 24 MHz (numer=125,
+// denom=3 → ~41.667 ns/tick). On Intel macs the timebase is 1:1 ns/tick which
+// is why this was easy to get wrong. Always convert via machTicksToMicros().
 const PROC_TASKINFO_SIZE = 96;
 
 // struct proc_vnodepathinfo = { pvi_cdir, pvi_rdir } — each a vnode_info_path.
@@ -92,8 +132,8 @@ fn taskInfo(pid: c_int) ?struct { rss: u64, user_us: u64, sys_us: u64 } {
     if (rc != PROC_TASKINFO_SIZE) return null;
     return .{
         .rss = std.mem.readInt(u64, task_buf[8..16], .little),
-        .user_us = std.mem.readInt(u64, task_buf[16..24], .little) / 1000,
-        .sys_us = std.mem.readInt(u64, task_buf[24..32], .little) / 1000,
+        .user_us = machTicksToMicros(std.mem.readInt(u64, task_buf[16..24], .little)),
+        .sys_us = machTicksToMicros(std.mem.readInt(u64, task_buf[24..32], .little)),
     };
 }
 
