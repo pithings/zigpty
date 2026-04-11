@@ -115,7 +115,7 @@ zig build -Dtarget=x86_64-windows
 bun run build
 
 # Run tests
-bun test
+bun run test
 
 # Cross-platform smoke tests (Docker, Linux only)
 bash scripts/cross-platform.sh
@@ -144,58 +144,58 @@ The native loader (`napi.ts`) tries glibc first, falls back to musl on Linux. On
 
 The pure Zig library (`lib.zig`) is exposed as the `"zigpty"` module in `build.zig`:
 
-| Function         | Signature                                  | Description                                                             |
-| ---------------- | ------------------------------------------ | ----------------------------------------------------------------------- |
-| `forkPty`        | `(ForkOptions) !ForkResult`                | Fork process with PTY (forkpty + signal handling + execvpe)             |
-| `openPty`        | `(cols, rows) !OpenResult`                 | Open bare PTY pair                                                      |
-| `resize`         | `(fd, cols, rows, x_pixel, y_pixel) !void` | Resize PTY (ioctl TIOCSWINSZ)                                           |
-| `getProcessName` | `(fd, buf) ?[]const u8`                    | Foreground process name via /proc                                       |
-| `getStats`       | `(fd, cwd_buf) ?Stats`                     | cwd + rss + cpu for foreground pgrp (Linux: /proc; macOS: proc_pidinfo) |
-| `waitForExit`    | `(pid) ExitInfo`                           | Blocking wait for child exit (call from background thread)              |
+| Function         | Signature                                  | Description                                                                                                                                                                                                                                              |
+| ---------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `forkPty`        | `(ForkOptions) !ForkResult`                | Fork process with PTY (forkpty + signal handling + execvpe)                                                                                                                                                                                              |
+| `openPty`        | `(cols, rows) !OpenResult`                 | Open bare PTY pair                                                                                                                                                                                                                                       |
+| `resize`         | `(fd, cols, rows, x_pixel, y_pixel) !void` | Resize PTY (ioctl TIOCSWINSZ)                                                                                                                                                                                                                            |
+| `getProcessName` | `(fd, buf) ?[]const u8`                    | Foreground process name via /proc                                                                                                                                                                                                                        |
+| `getStats`       | `(fd, allocator, cwd_buf) ?Stats`          | Aggregate rss + cpu across every process in the foreground pgrp. Linux: walks `/proc` filtering by pgrp. macOS: `proc_listpids(PROC_PGRP_ONLY)` + `proc_pidinfo`. Returns leader cwd + totals + per-child array (caller must `stats.deinit(allocator)`). |
+| `waitForExit`    | `(pid) ExitInfo`                           | Blocking wait for child exit (call from background thread)                                                                                                                                                                                               |
 
-Types: `ForkOptions`, `ForkResult`, `OpenResult`, `ExitInfo`, `Stats`, `PtyError`, `Fd`, `Pid`
+Types: `ForkOptions`, `ForkResult`, `OpenResult`, `ExitInfo`, `Stats`, `ChildStats`, `PtyError`, `Fd`, `Pid`
 
 ### Windows
 
 Available via `lib.win` (re-exports `pty_windows.zig`):
 
-| Function        | Signature                                             | Description                                                      |
-| --------------- | ----------------------------------------------------- | ---------------------------------------------------------------- |
-| `createConPty`  | `(cols, rows) !ConPtySetup`                           | Phase 1: create pipes + pseudo console                           |
-| `startProcess`  | `(hpc, cmd_line, env_block, cwd) !{process, pid}`     | Phase 2: spawn process in ConPTY                                 |
-| `spawnConPty`   | `(cmd_line, env_block, cwd, cols, rows) !SpawnResult` | Convenience: createConPty + startProcess                         |
-| `readOutput`    | `(conout, buf) usize`                                 | Read from output pipe (blocking)                                 |
-| `writeInput`    | `(conin, data) !void`                                 | Write to input pipe                                              |
-| `resizeConsole` | `(hpc, cols, rows) !void`                             | Resize pseudo console                                            |
-| `waitForExit`   | `(process) ExitInfo`                                  | Wait for process exit (blocking)                                 |
-| `killProcess`   | `(process, exit_code) void`                           | Terminate process                                                |
-| `closePty`      | `(result) void`                                       | Close all ConPTY handles                                         |
-| `getStats`      | `(process, pid) ?Stats`                               | rss + cpu via K32GetProcessMemoryInfo + GetProcessTimes (no cwd) |
+| Function        | Signature                                             | Description                                                                                                                                                                                                                            |
+| --------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createConPty`  | `(cols, rows) !ConPtySetup`                           | Phase 1: create pipes + pseudo console                                                                                                                                                                                                 |
+| `startProcess`  | `(hpc, cmd_line, env_block, cwd) !{process, pid}`     | Phase 2: spawn process in ConPTY                                                                                                                                                                                                       |
+| `spawnConPty`   | `(cmd_line, env_block, cwd, cols, rows) !SpawnResult` | Convenience: createConPty + startProcess                                                                                                                                                                                               |
+| `readOutput`    | `(conout, buf) usize`                                 | Read from output pipe (blocking)                                                                                                                                                                                                       |
+| `writeInput`    | `(conin, data) !void`                                 | Write to input pipe                                                                                                                                                                                                                    |
+| `resizeConsole` | `(hpc, cols, rows) !void`                             | Resize pseudo console                                                                                                                                                                                                                  |
+| `waitForExit`   | `(process) ExitInfo`                                  | Wait for process exit (blocking)                                                                                                                                                                                                       |
+| `killProcess`   | `(process, exit_code) void`                           | Terminate process                                                                                                                                                                                                                      |
+| `closePty`      | `(result) void`                                       | Close all ConPTY handles                                                                                                                                                                                                               |
+| `getStats`      | `(process, pid, allocator) ?Stats`                    | Aggregate rss + cpu across the shell process and its descendant tree via `CreateToolhelp32Snapshot`. Per-descendant data via `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `K32GetProcessMemoryInfo` + `GetProcessTimes`. No cwd. |
 
-Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `Stats`, `ConPtyError`, `HPCON`, `HANDLE`
+Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `Stats`, `ChildStats`, `ConPtyError`, `HPCON`, `HANDLE`
 
 ## NAPI API (Zig → JS)
 
 ### Unix Exports
 
-| Export    | Signature                                                                       | Implementation                           |
-| --------- | ------------------------------------------------------------------------------- | ---------------------------------------- |
-| `fork`    | `(file, args[], env[], cwd, cols, rows, uid, gid, utf8, cb)` → `{fd, pid, pty}` | `lib.forkPty()` + thread `waitForExit()` |
-| `open`    | `(cols, rows)` → `{master, slave, pty}`                                         | `lib.openPty()`                          |
-| `resize`  | `(fd, cols, rows)` → void                                                       | `lib.resize()`                           |
-| `process` | `(fd)` → string                                                                 | `lib.getProcessName()`                   |
-| `stats`   | `(fd)` → `{pid, cwd, rssBytes, cpuUser, cpuSys}` \| undefined                   | `lib.getStats()` (foreground pgrp)       |
+| Export    | Signature                                                                        | Implementation                           |
+| --------- | -------------------------------------------------------------------------------- | ---------------------------------------- |
+| `fork`    | `(file, args[], env[], cwd, cols, rows, uid, gid, utf8, cb)` → `{fd, pid, pty}`  | `lib.forkPty()` + thread `waitForExit()` |
+| `open`    | `(cols, rows)` → `{master, slave, pty}`                                          | `lib.openPty()`                          |
+| `resize`  | `(fd, cols, rows)` → void                                                        | `lib.resize()`                           |
+| `process` | `(fd)` → string                                                                  | `lib.getProcessName()`                   |
+| `stats`   | `(fd)` → `{pid, cwd, rssBytes, cpuUser, cpuSys, count, children[]}` \| undefined | `lib.getStats()` (aggregates full pgrp)  |
 
 ### Windows Exports
 
-| Export   | Signature                                                                  | Implementation                                    |
-| -------- | -------------------------------------------------------------------------- | ------------------------------------------------- |
-| `spawn`  | `(file, args[], env[], cwd, cols, rows, onData, onExit)` → `{pid, handle}` | `win.spawnConPty()` + read thread + exit thread   |
-| `write`  | `(handle, data)` → void                                                    | `win.writeInput()`                                |
-| `resize` | `(handle, cols, rows)` → void                                              | `win.resizeConsole()`                             |
-| `kill`   | `(handle)` → void                                                          | `win.killProcess()`                               |
-| `close`  | `(handle)` → void                                                          | `win.closePty()`                                  |
-| `stats`  | `(handle)` → `{pid, cwd, rssBytes, cpuUser, cpuSys}` \| undefined          | `win.getStats()` (shell process, cwd always null) |
+| Export   | Signature                                                                            | Implementation                                              |
+| -------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| `spawn`  | `(file, args[], env[], cwd, cols, rows, onData, onExit)` → `{pid, handle}`           | `win.spawnConPty()` + read thread + exit thread             |
+| `write`  | `(handle, data)` → void                                                              | `win.writeInput()`                                          |
+| `resize` | `(handle, cols, rows)` → void                                                        | `win.resizeConsole()`                                       |
+| `kill`   | `(handle)` → void                                                                    | `win.killProcess()`                                         |
+| `close`  | `(handle)` → void                                                                    | `win.closePty()`                                            |
+| `stats`  | `(handle)` → `{pid, cwd, rssBytes, cpuUser, cpuSys, count, children[]}` \| undefined | `win.getStats()` (shell + descendant tree, cwd always null) |
 
 Windows uses `napi_external` to wrap the `WinConPtyContext` handle. Data flows from a Zig read thread to JS via `napi_threadsafe_function` (onData callback).
 
@@ -229,13 +229,16 @@ Options: `{ timeout?: number }` (default: 30s). Throws on timeout.
 
 ### `stats()`
 
-On-demand snapshot of OS-level process info for the PTY. Returns `{pid, cwd, rssBytes, cpuUser, cpuSys}` or `null`. CPU times are in microseconds, `rssBytes` is resident set size.
+On-demand snapshot of OS-level process info for the PTY. Returns `{pid, cwd, rssBytes, cpuUser, cpuSys, count, children}` or `null`. `rssBytes`/`cpuUser`/`cpuSys` are **totals** aggregated across the leader and every tracked child. `count` is the total number of processes that were rolled into the totals. `children[]` contains one entry per non-leader process (`{pid, name, rssBytes, cpuUser, cpuSys}`). CPU times are in microseconds, `rssBytes` is resident set size.
 
-- **Unix**: targets the PTY's foreground process group (same target as `pty.process`), so the numbers follow whatever the user is currently running. Linux reads `/proc/<pid>/{cwd,stat}`; macOS uses `proc_pidinfo(PROC_PIDTASKINFO)` + `proc_pidinfo(PROC_PIDVNODEPATHINFO)`.
-- **Windows**: reports the spawned shell process (no ConPTY foreground tracking). `rssBytes` via `K32GetProcessMemoryInfo`, CPU via `GetProcessTimes`. `cwd` is always `null` — reading another process's cwd requires `NtQueryInformationProcess` + remote PEB read, which is fragile across elevation boundaries.
-- **PipePty** (fallback): implemented in TypeScript on Linux only (reads `/proc/<child_pid>/{cwd,stat}`). Returns `null` on other platforms.
+- **Linux**: walks `/proc/*/stat` and aggregates every process whose `pgrp` matches `tcgetpgrp(fd)`. Covers the full foreground job (workers, subshells) as long as they don't `setpgid` away. Leader `cwd` comes from `readlink(/proc/<pgrp>/cwd)`.
+- **macOS**: `proc_listpids(PROC_PGRP_ONLY, pgrp, ...)` enumerates pids in the pgrp, then `proc_pidinfo(PROC_PIDTASKINFO)` provides rss + cpu per pid. Child names via `proc_name`. Leader `cwd` via `proc_pidinfo(PROC_PIDVNODEPATHINFO)`.
+- **Windows**: no pgrp concept under ConPTY, so the unit is the **descendant tree**. `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` snapshots every running process, then transitive descendants of the shell are marked and enumerated. Per-descendant rss + cpu via `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `K32GetProcessMemoryInfo` + `GetProcessTimes`. `cwd` is always `null` — reading another process's cwd requires `NtQueryInformationProcess` + remote PEB read, which is fragile across elevation boundaries.
+- **PipePty** (fallback): Linux-only. Walks `/proc` and filters by `pgrp == child_pid` (same aggregation as native). Returns `null` on other platforms.
 
-No background thread — stats are pulled only when called. Returns `null` after close or when the process has exited.
+No background thread — stats are pulled only when called. Returns `null` after close, when the process has exited, or when the walk finds no matching processes.
+
+Name field caveats: Unix `proc_name`/`/proc/<pid>/stat` truncates to 15 chars; Windows `szExeFile` allows up to ~31 chars (we truncate to 31). On macOS, Apple-shipped `sleep` / `ls` etc. have a `g`-prefixed `comm` (e.g. `gsleep`) when invoked via symlink — that is the kernel's view, not a bug.
 
 ### Terminal API (Bun-compatible)
 

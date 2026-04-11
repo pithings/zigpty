@@ -7,6 +7,8 @@ extern fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern fn tcgetpgrp(fd: c_int) c_int;
 extern fn sysctl(name: [*]c_int, namelen: c_uint, oldp: ?*anyopaque, oldlenp: ?*usize, newp: ?*const anyopaque, newlen: usize) c_int;
 extern fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *anyopaque, buffersize: c_int) c_int;
+extern fn proc_listpids(type: u32, typeinfo: u32, buffer: ?*anyopaque, buffersize: c_int) c_int;
+extern fn proc_name(pid: c_int, buffer: *anyopaque, buffersize: u32) c_int;
 
 /// On macOS there is no execvpe — set environ pointer then execvp.
 pub fn execChild(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) void {
@@ -78,34 +80,111 @@ const PROC_VNODEPATHINFO_SIZE = 2352;
 const VIP_PATH_OFFSET = 152;
 const MAXPATHLEN = 1024;
 
-/// Get stats for the PTY's foreground process group.
-pub fn getStats(fd: posix.fd_t, cwd_buf: []u8) ?lib.Stats {
+// proc_listpids flavors (from <libproc.h>):
+//   PROC_ALL_PIDS=1, PROC_PGRP_ONLY=2, PROC_TTY_ONLY=3, PROC_UID_ONLY=4, PROC_RUID_ONLY=5
+const PROC_PGRP_ONLY: u32 = 2;
+
+/// Fetch per-process rss + cpu via PROC_PIDTASKINFO. Returns null if the call
+/// fails (process exited) or the layout check fails.
+fn taskInfo(pid: c_int) ?struct { rss: u64, user_us: u64, sys_us: u64 } {
+    var task_buf: [PROC_TASKINFO_SIZE]u8 align(8) = undefined;
+    const rc = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task_buf, PROC_TASKINFO_SIZE);
+    if (rc != PROC_TASKINFO_SIZE) return null;
+    return .{
+        .rss = std.mem.readInt(u64, task_buf[8..16], .little),
+        .user_us = std.mem.readInt(u64, task_buf[16..24], .little) / 1000,
+        .sys_us = std.mem.readInt(u64, task_buf[24..32], .little) / 1000,
+    };
+}
+
+/// Get aggregated stats for the PTY's foreground process group.
+/// Enumerates every process in the pgrp via proc_listpids(PROC_PGRP_ONLY),
+/// sums rss + cpu, and returns per-process info in `children`.
+pub fn getStats(fd: posix.fd_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?lib.Stats {
     const pgrp = tcgetpgrp(@intCast(fd));
     if (pgrp < 0) return null;
 
-    var stats = lib.Stats{
-        .pid = pgrp,
-        .cwd = null,
-        .rss_bytes = 0,
-        .cpu_user_us = 0,
-        .cpu_sys_us = 0,
-    };
-    var any_field: bool = false;
+    // proc_listpids returns bytes written. When the result equals the buffer
+    // size, the list was probably truncated — retry on the heap with a bigger
+    // buffer until the kernel reports fewer bytes than we handed it.
+    const stack_cap: usize = 512;
+    var stack_buf: [stack_cap]c_int = undefined;
+    var pids: []c_int = stack_buf[0..];
+    var heap_pids: ?[]c_int = null;
+    defer if (heap_pids) |h| allocator.free(h);
 
-    // PROC_PIDTASKINFO → virtual_size, resident_size, total_user (ns), total_system (ns)
-    var task_buf: [PROC_TASKINFO_SIZE]u8 align(8) = undefined;
-    const ti_rc = proc_pidinfo(pgrp, PROC_PIDTASKINFO, 0, &task_buf, PROC_TASKINFO_SIZE);
-    if (ti_rc == PROC_TASKINFO_SIZE) {
-        stats.rss_bytes = std.mem.readInt(u64, task_buf[8..16], .little);
-        const total_user_ns = std.mem.readInt(u64, task_buf[16..24], .little);
-        const total_sys_ns = std.mem.readInt(u64, task_buf[24..32], .little);
-        stats.cpu_user_us = total_user_ns / 1000;
-        stats.cpu_sys_us = total_sys_ns / 1000;
-        any_field = true;
+    var got_bytes = proc_listpids(PROC_PGRP_ONLY, @intCast(pgrp), pids.ptr, @intCast(pids.len * @sizeOf(c_int)));
+    if (got_bytes <= 0) return null;
+
+    // proc_listpids only reports bytes written, so an exact-fill is
+    // indistinguishable from truncation — we may retry one extra time on a
+    // perfectly-fitted buffer. Cap at 65536 pids (256KB on the heap) since no
+    // realistic foreground job has that many processes; beyond the cap we
+    // accept a truncated view.
+    var cap: usize = stack_cap;
+    while (@as(usize, @intCast(got_bytes)) >= cap * @sizeOf(c_int) and cap < 65536) {
+        cap *= 4;
+        if (heap_pids) |old| allocator.free(old);
+        heap_pids = null;
+        // On alloc failure, fall through with the previous (truncated) result
+        // — `pids` still points at the prior buffer and `got_bytes` reflects
+        // its content, so we degrade to a partial enumeration instead of
+        // returning null.
+        const h = allocator.alloc(c_int, cap) catch break;
+        heap_pids = h;
+        pids = h;
+        got_bytes = proc_listpids(PROC_PGRP_ONLY, @intCast(pgrp), h.ptr, @intCast(h.len * @sizeOf(c_int)));
+        if (got_bytes <= 0) return null;
     }
 
-    // PROC_PIDVNODEPATHINFO → cwd path at offset VIP_PATH_OFFSET (MAXPATHLEN bytes, null-terminated).
-    // proc_pidinfo returns the full struct size on success or -1 on error — no partial fills.
+    const num_pids: usize = @intCast(@divTrunc(got_bytes, @sizeOf(c_int)));
+    if (num_pids == 0) return null;
+
+    var children = std.ArrayListUnmanaged(lib.ChildStats){};
+    errdefer children.deinit(allocator);
+
+    var total_rss: u64 = 0;
+    var total_user: u64 = 0;
+    var total_sys: u64 = 0;
+    var count: u32 = 0;
+
+    for (pids[0..num_pids]) |pid| {
+        if (pid <= 0) continue;
+        const ti = taskInfo(pid) orelse continue;
+
+        if (pid == pgrp) {
+            total_rss += ti.rss;
+            total_user += ti.user_us;
+            total_sys += ti.sys_us;
+            count += 1;
+        } else {
+            var child = lib.ChildStats{
+                .pid = pid,
+                .name = undefined,
+                .name_len = 0,
+                .rss_bytes = ti.rss,
+                .cpu_user_us = ti.user_us,
+                .cpu_sys_us = ti.sys_us,
+            };
+            // proc_name returns bytes written (not including null).
+            // Use full ChildStats.name capacity; proc_name truncates to 15 anyway.
+            const n = proc_name(pid, &child.name, child.name.len);
+            if (n > 0) child.name_len = @intCast(@min(@as(c_int, @intCast(child.name.len)), n));
+            children.append(allocator, child) catch continue;
+            total_rss += ti.rss;
+            total_user += ti.user_us;
+            total_sys += ti.sys_us;
+            count += 1;
+        }
+    }
+
+    if (count == 0) {
+        children.deinit(allocator);
+        return null;
+    }
+
+    // Resolve leader cwd via PROC_PIDVNODEPATHINFO.
+    var leader_cwd: ?[]const u8 = null;
     var vpi_buf: [PROC_VNODEPATHINFO_SIZE]u8 align(8) = undefined;
     const vpi_rc = proc_pidinfo(pgrp, PROC_PIDVNODEPATHINFO, 0, &vpi_buf, PROC_VNODEPATHINFO_SIZE);
     if (vpi_rc == PROC_VNODEPATHINFO_SIZE) {
@@ -113,12 +192,23 @@ pub fn getStats(fd: posix.fd_t, cwd_buf: []u8) ?lib.Stats {
         const len = std.mem.indexOfScalar(u8, path_slice, 0) orelse MAXPATHLEN;
         if (len > 0 and len <= cwd_buf.len) {
             @memcpy(cwd_buf[0..len], path_slice[0..len]);
-            stats.cwd = cwd_buf[0..len];
-            any_field = true;
+            leader_cwd = cwd_buf[0..len];
         }
     }
 
-    return if (any_field) stats else null;
+    const owned = children.toOwnedSlice(allocator) catch blk: {
+        children.deinit(allocator);
+        break :blk &[_]lib.ChildStats{};
+    };
+    return lib.Stats{
+        .pid = pgrp,
+        .cwd = leader_cwd,
+        .rss_bytes = total_rss,
+        .cpu_user_us = total_user,
+        .cpu_sys_us = total_sys,
+        .count = count,
+        .children = owned,
+    };
 }
 
 /// Raw exit — bypasses libc's exit() and its atexit handlers.

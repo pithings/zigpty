@@ -108,5 +108,38 @@ pub fn buildStatsObject(env: napi.napi_env, s: lib.Stats) !napi.napi_value {
     try napi.check(env, napi.napi_create_int64(env, @intCast(s.cpu_sys_us), &cpu_sys_val));
     try napi.setProp(env, obj, "cpuSys", cpu_sys_val);
 
+    var count_val: napi.napi_value = undefined;
+    try napi.check(env, napi.napi_create_int64(env, @intCast(s.count), &count_val));
+    try napi.setProp(env, obj, "count", count_val);
+
+    // children: Array<{ pid, name, rssBytes, cpuUser, cpuSys }>
+    var arr: napi.napi_value = undefined;
+    try napi.check(env, napi.napi_create_array_with_length(env, s.children.len, &arr));
+    for (s.children, 0..) |child, i| {
+        var c_obj: napi.napi_value = undefined;
+        try napi.check(env, napi.napi_create_object(env, &c_obj));
+
+        var c_pid: napi.napi_value = undefined;
+        try napi.check(env, napi.napi_create_int64(env, @intCast(child.pid), &c_pid));
+        try napi.setProp(env, c_obj, "pid", c_pid);
+
+        try napi.setProp(env, c_obj, "name", try napi.createString(env, child.nameSlice()));
+
+        var c_rss: napi.napi_value = undefined;
+        try napi.check(env, napi.napi_create_int64(env, @intCast(child.rss_bytes), &c_rss));
+        try napi.setProp(env, c_obj, "rssBytes", c_rss);
+
+        var c_user: napi.napi_value = undefined;
+        try napi.check(env, napi.napi_create_int64(env, @intCast(child.cpu_user_us), &c_user));
+        try napi.setProp(env, c_obj, "cpuUser", c_user);
+
+        var c_sys: napi.napi_value = undefined;
+        try napi.check(env, napi.napi_create_int64(env, @intCast(child.cpu_sys_us), &c_sys));
+        try napi.setProp(env, c_obj, "cpuSys", c_sys);
+
+        try napi.check(env, napi.napi_set_element(env, arr, @intCast(i), c_obj));
+    }
+    try napi.setProp(env, obj, "children", arr);
+
     return obj;
 }

@@ -2,12 +2,22 @@ import { createRequire } from "node:module";
 import { arch, platform } from "node:os";
 import { fileURLToPath } from "node:url";
 
+export interface INativeChildStats {
+  pid: number;
+  name: string;
+  rssBytes: number;
+  cpuUser: number;
+  cpuSys: number;
+}
+
 export interface INativeStats {
   pid: number;
   cwd: string | null;
   rssBytes: number;
   cpuUser: number;
   cpuSys: number;
+  count: number;
+  children: INativeChildStats[];
 }
 
 export interface INativeUnix {

@@ -266,7 +266,8 @@ fn statsImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value
     if (fd_i32 < 0) return pty.returnUndef(env);
 
     var cwd_buf: [4096]u8 = undefined;
-    const s = lib.getStats(@intCast(fd_i32), &cwd_buf) orelse return pty.returnUndef(env);
+    var s = lib.getStats(@intCast(fd_i32), alloc, &cwd_buf) orelse return pty.returnUndef(env);
+    defer s.deinit(alloc);
 
     return try pty.buildStatsObject(env, s);
 }

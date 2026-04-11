@@ -79,8 +79,33 @@ pub const PtyError = error{
     TtynameFailed,
 };
 
-/// Process stats for a PTY's foreground process (Unix) or shell process (Windows).
-/// `cwd` is a slice into the caller-provided buffer — null on Windows (not tracked).
+/// Info for a single non-leader process aggregated into Stats.
+/// `name` is a short executable/command name (truncated to 32 bytes).
+pub const ChildStats = struct {
+    pid: Pid,
+    name: [32]u8,
+    name_len: u8,
+    rss_bytes: u64,
+    cpu_user_us: u64,
+    cpu_sys_us: u64,
+
+    pub fn nameSlice(self: *const ChildStats) []const u8 {
+        return self.name[0..self.name_len];
+    }
+};
+
+/// Aggregated process stats for a PTY.
+/// Unix: aggregates the PTY's foreground process group.
+/// Windows: aggregates the shell process and its descendant tree.
+///
+/// Top-level `rss_bytes`/`cpu_user_us`/`cpu_sys_us` are totals across all
+/// aggregated processes (leader + children). `pid`/`cwd` refer to the leader
+/// (foreground pgrp leader on Unix, shell process on Windows). `children`
+/// lists all non-leader processes that were aggregated; `count` is the total
+/// number of processes (children.len + 1).
+///
+/// `cwd` is a slice into the caller-provided buffer — null on Windows.
+/// `children` is owned by the caller's allocator — call `deinit` to free.
 /// CPU times are in microseconds. `rss_bytes` is resident set size.
 pub const Stats = struct {
     pid: Pid,
@@ -88,6 +113,13 @@ pub const Stats = struct {
     rss_bytes: u64,
     cpu_user_us: u64,
     cpu_sys_us: u64,
+    count: u32,
+    children: []const ChildStats,
+
+    pub fn deinit(self: *Stats, allocator: std.mem.Allocator) void {
+        if (self.children.len > 0) allocator.free(self.children);
+        self.children = &[_]ChildStats{};
+    }
 };
 
 // Unix extern declarations and functions — only compiled on non-Windows
@@ -213,8 +245,8 @@ fn getProcessNameUnix(fd: std.posix.fd_t, buf: []u8) ?[]const u8 {
     return platform.getProcessName(fd, buf);
 }
 
-fn getStatsUnix(fd: std.posix.fd_t, cwd_buf: []u8) ?Stats {
-    return platform.getStats(fd, cwd_buf);
+fn getStatsUnix(fd: std.posix.fd_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?Stats {
+    return platform.getStats(fd, allocator, cwd_buf);
 }
 
 fn waitForExitUnix(pid: std.posix.pid_t) ExitInfo {

@@ -174,6 +174,32 @@ describe("stats", () => {
     expect(pty.stats()).toBeNull();
     await pty.exited;
   });
+
+  it("should aggregate child processes", async () => {
+    // Unix: sh runs two `sleep` children in a single pgrp — aggregation should
+    // see count=3 (sh + 2 sleeps).
+    // Windows: cmd uses `start /B` to actually background two pings in its
+    // descendant tree (cmd's `&` is sequential, not parallel).
+    const [exe, args] = isWindows
+      ? [
+          "cmd.exe",
+          ["/c", "start /B ping -n 10 127.0.0.1 && start /B ping -n 10 127.0.0.1 && timeout /t 10"],
+        ]
+      : ["/bin/sh", ["-c", "sleep 2 & sleep 2 & wait"]];
+    const pty = spawn(exe, args);
+
+    const stats = await pollStats(pty, (s) => s.count >= 3 && s.children.length >= 2);
+    expect(stats.count).toBeGreaterThanOrEqual(3);
+    expect(stats.children.length).toBeGreaterThanOrEqual(2);
+    for (const c of stats.children) {
+      expect(c.pid).toBeGreaterThan(0);
+      expect(typeof c.name).toBe("string");
+      expect(c.rssBytes).toBeGreaterThanOrEqual(0);
+    }
+
+    pty.kill();
+    await pty.exited;
+  });
 });
 
 describeUnix("process name (unix)", () => {

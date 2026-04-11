@@ -8,17 +8,38 @@ export interface IDisposable {
   dispose(): void;
 }
 
-export interface IPtyStats {
-  /** PID whose stats are reported. On Unix this is the foreground process group of the PTY; on Windows it's the spawned shell process. */
+export interface IPtyChildStats {
+  /** Process ID. */
   pid: number;
-  /** Current working directory. `null` when unavailable (always on Windows, or when the process has exited). */
-  cwd: string | null;
+  /** Short executable / command name (truncated to ~15 chars on Unix, up to 31 on Windows). */
+  name: string;
   /** Resident set size (physical memory) in bytes. */
   rssBytes: number;
   /** Accumulated user-mode CPU time in microseconds. */
   cpuUser: number;
   /** Accumulated system-mode CPU time in microseconds. */
   cpuSys: number;
+}
+
+export interface IPtyStats {
+  /** Leader PID. On Unix this is the foreground process group of the PTY; on Windows it's the spawned shell process. */
+  pid: number;
+  /** Leader's current working directory. `null` when unavailable (always on Windows, or when the process has exited). */
+  cwd: string | null;
+  /** Total resident set size (physical memory) in bytes, aggregated across leader + children. */
+  rssBytes: number;
+  /** Total accumulated user-mode CPU time in microseconds, aggregated across leader + children. */
+  cpuUser: number;
+  /** Total accumulated system-mode CPU time in microseconds, aggregated across leader + children. */
+  cpuSys: number;
+  /** Total number of processes aggregated (leader + children). Always `>= 1`. */
+  count: number;
+  /**
+   * Non-leader processes aggregated into the totals.
+   * - Unix: every other process in the foreground process group.
+   * - Windows: every transitive descendant of the shell process.
+   */
+  children: IPtyChildStats[];
 }
 
 export interface IPty {

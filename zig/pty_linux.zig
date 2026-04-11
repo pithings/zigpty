@@ -187,93 +187,149 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
     return if (std.mem.lastIndexOfScalar(u8, cmd, '/')) |p| cmd[p + 1 ..] else cmd;
 }
 
-/// Get stats for the PTY's foreground process group.
-/// `cwd_buf` is used to store the cwd string — returned slice points into it.
-pub fn getStats(fd: posix.fd_t, cwd_buf: []u8) ?lib.Stats {
+/// Parsed fields from /proc/<pid>/stat.
+const ProcStat = struct {
+    pgrp: posix.pid_t,
+    comm: []const u8, // slice into source buffer
+    utime_ticks: u64,
+    stime_ticks: u64,
+    rss_pages: u64,
+};
+
+/// Get aggregated stats for the PTY's foreground process group.
+/// Walks /proc and sums rss+cpu across every process whose pgrp matches
+/// `tcgetpgrp(fd)`. The leader is the pgrp id itself. `children` (owned by
+/// `allocator`) lists every other process in the pgrp.
+pub fn getStats(fd: posix.fd_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?lib.Stats {
     const pgrp = tcgetpgrp(@intCast(fd));
     if (pgrp < 0) return null;
-    return statsForPid(pgrp, cwd_buf);
-}
 
-fn statsForPid(pid: posix.pid_t, cwd_buf: []u8) ?lib.Stats {
-    var stats = lib.Stats{
-        .pid = pid,
-        .cwd = null,
-        .rss_bytes = 0,
-        .cpu_user_us = 0,
-        .cpu_sys_us = 0,
-    };
-    var any_field: bool = false;
+    const clk_tck: u64 = 100;
+    const page_size = getPageSize();
 
+    var children = std.ArrayListUnmanaged(lib.ChildStats){};
+    errdefer children.deinit(allocator);
+
+    var total_rss: u64 = 0;
+    var total_user: u64 = 0;
+    var total_sys: u64 = 0;
+    var count: u32 = 0;
+    var leader_cwd: ?[]const u8 = null;
+
+    // Resolve leader cwd first — this is the one field that still refers only
+    // to the foreground pgrp leader.
     var path_buf: [64]u8 = undefined;
-
-    // Resolve /proc/<pid>/cwd via readlink.
-    if (std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid})) |cwd_path| {
+    if (std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pgrp})) |cwd_path| {
         if (std.posix.readlink(cwd_path, cwd_buf)) |link| {
-            if (link.len > 0) {
-                stats.cwd = link;
-                any_field = true;
-            }
+            if (link.len > 0) leader_cwd = link;
         } else |_| {}
     } else |_| {}
 
-    // Read /proc/<pid>/stat for cpu + rss.
-    read_stat: {
-        const stat_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch break :read_stat;
-        const f = std.fs.openFileAbsolute(stat_path, .{}) catch break :read_stat;
+    var dir = std.fs.openDirAbsolute("/proc", .{ .iterate = true }) catch return null;
+    defer dir.close();
+
+    var it = dir.iterate();
+    while (true) {
+        const entry = (it.next() catch break) orelse break;
+        // Don't filter by entry.kind — procfs can return .unknown depending on
+        // the kernel/mount. parseInt on the name is enough to skip non-pid dirs.
+        const pid = std.fmt.parseInt(posix.pid_t, entry.name, 10) catch continue;
+
+        const stat_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch continue;
+        const f = std.fs.openFileAbsolute(stat_path, .{}) catch continue;
         defer f.close();
 
         var stat_buf: [1024]u8 = undefined;
-        const n = f.read(&stat_buf) catch break :read_stat;
-        if (n == 0) break :read_stat;
+        const n = f.read(&stat_buf) catch continue;
+        if (n == 0) continue;
 
-        if (parseProcStat(stat_buf[0..n], &stats)) any_field = true;
+        const ps = parseProcStat(stat_buf[0..n]) orelse continue;
+        if (ps.pgrp != pgrp) continue;
+
+        const rss_bytes = ps.rss_pages * page_size;
+        const cpu_user_us = (ps.utime_ticks * 1_000_000) / clk_tck;
+        const cpu_sys_us = (ps.stime_ticks * 1_000_000) / clk_tck;
+
+        if (pid == pgrp) {
+            total_rss += rss_bytes;
+            total_user += cpu_user_us;
+            total_sys += cpu_sys_us;
+            count += 1;
+        } else {
+            var child = lib.ChildStats{
+                .pid = pid,
+                .name = undefined,
+                .name_len = 0,
+                .rss_bytes = rss_bytes,
+                .cpu_user_us = cpu_user_us,
+                .cpu_sys_us = cpu_sys_us,
+            };
+            const nl = @min(ps.comm.len, child.name.len);
+            if (nl > 0) @memcpy(child.name[0..nl], ps.comm[0..nl]);
+            child.name_len = @intCast(nl);
+            children.append(allocator, child) catch continue;
+            total_rss += rss_bytes;
+            total_user += cpu_user_us;
+            total_sys += cpu_sys_us;
+            count += 1;
+        }
     }
 
-    return if (any_field) stats else null;
+    if (count == 0) {
+        children.deinit(allocator);
+        return null;
+    }
+
+    const owned = children.toOwnedSlice(allocator) catch blk: {
+        children.deinit(allocator);
+        break :blk &[_]lib.ChildStats{};
+    };
+    return lib.Stats{
+        .pid = pgrp,
+        .cwd = leader_cwd,
+        .rss_bytes = total_rss,
+        .cpu_user_us = total_user,
+        .cpu_sys_us = total_sys,
+        .count = count,
+        .children = owned,
+    };
 }
 
-/// Parse /proc/<pid>/stat. Format: `pid (comm) state ppid ...`
+/// Parse /proc/<pid>/stat. Format: `pid (comm) state ppid pgrp ...`
 /// comm can contain spaces/parens, so we skip to the LAST ')' then count fields.
-/// Returns true if any field was populated.
-fn parseProcStat(buf: []const u8, stats: *lib.Stats) bool {
-    const last_paren = std.mem.lastIndexOfScalar(u8, buf, ')') orelse return false;
-    if (last_paren + 2 >= buf.len) return false;
+fn parseProcStat(buf: []const u8) ?ProcStat {
+    const first_paren = std.mem.indexOfScalar(u8, buf, '(') orelse return null;
+    const last_paren = std.mem.lastIndexOfScalar(u8, buf, ')') orelse return null;
+    if (last_paren <= first_paren or last_paren + 2 >= buf.len) return null;
 
-    // Fields after last ')': state ppid pgrp session tty_nr tpgid flags
-    //   minflt cminflt majflt cmajflt utime stime cutime cstime priority
-    //   nice num_threads itrealvalue starttime vsize rss ...
-    // Indices (0-based):  0:state 11:utime 12:stime 21:rss_pages
+    const comm = buf[first_paren + 1 .. last_paren];
+
+    // Fields after last ')': state(0) ppid(1) pgrp(2) session(3) tty_nr(4)
+    //   tpgid(5) flags(6) minflt(7) cminflt(8) majflt(9) cmajflt(10)
+    //   utime(11) stime(12) cutime(13) cstime(14) priority(15) nice(16)
+    //   num_threads(17) itrealvalue(18) starttime(19) vsize(20) rss(21)
     var it = std.mem.tokenizeScalar(u8, buf[last_paren + 2 ..], ' ');
     var idx: usize = 0;
-    var utime_ticks: u64 = 0;
-    var stime_ticks: u64 = 0;
-    var rss_pages: u64 = 0;
-    var reached_rss = false;
+    var result = ProcStat{
+        .pgrp = -1,
+        .comm = comm,
+        .utime_ticks = 0,
+        .stime_ticks = 0,
+        .rss_pages = 0,
+    };
     while (it.next()) |field| : (idx += 1) {
         switch (idx) {
-            11 => utime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
-            12 => stime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
+            2 => result.pgrp = std.fmt.parseInt(posix.pid_t, field, 10) catch return null,
+            11 => result.utime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
+            12 => result.stime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
             21 => {
-                rss_pages = std.fmt.parseInt(u64, field, 10) catch return false;
-                reached_rss = true;
-                break;
+                result.rss_pages = std.fmt.parseInt(u64, field, 10) catch return null;
+                return result;
             },
             else => {},
         }
     }
-    if (!reached_rss) return false;
-
-    // USER_HZ is hard-coded to 100 on every Linux kernel — safer than sysconf(_SC_CLK_TCK)
-    // which has different SC constants across libcs (glibc/musl=2, Bionic=6), making
-    // Android musl builds read the wrong value.
-    const clk_tck: u64 = 100;
-    const page_size = getPageSize();
-
-    stats.cpu_user_us = (utime_ticks * 1_000_000) / clk_tck;
-    stats.cpu_sys_us = (stime_ticks * 1_000_000) / clk_tck;
-    stats.rss_bytes = rss_pages * page_size;
-    return true;
+    return null;
 }
 
 var cached_page_size: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);

@@ -471,35 +471,104 @@ function getPageSize(): number {
   return _pageSize;
 }
 
+/** Parsed /proc/<pid>/stat row used for aggregation. */
+interface ProcStatRow {
+  comm: string;
+  pgrp: number;
+  utimeTicks: number;
+  stimeTicks: number;
+  rssPages: number;
+}
+
+function parseProcStat(raw: string): ProcStatRow | null {
+  const firstParen = raw.indexOf("(");
+  const lastParen = raw.lastIndexOf(")");
+  if (firstParen < 0 || lastParen < 0 || lastParen <= firstParen || lastParen + 2 >= raw.length) {
+    return null;
+  }
+  const comm = raw.slice(firstParen + 1, lastParen);
+  const fields = raw.slice(lastParen + 2).split(" ");
+  // Indices after last ')': 2=pgrp, 11=utime, 12=stime, 21=rss_pages
+  const pgrp = Number(fields[2] ?? 0);
+  if (!Number.isFinite(pgrp)) return null;
+  return {
+    comm,
+    pgrp,
+    utimeTicks: Number(fields[11] ?? 0),
+    stimeTicks: Number(fields[12] ?? 0),
+    rssPages: Number(fields[21] ?? 0),
+  };
+}
+
 function readLinuxStats(pid: number): IPtyStats | null {
-  let cwd: string | null = null;
+  const pageSize = getPageSize();
+  // The leader pid acts as the pgrp id (the child was spawned with `detached: true`
+  // so setsid() made it its own session leader). Walk /proc and sum everything
+  // whose pgrp matches.
+  let leaderCwd: string | null = null;
   try {
-    cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+    leaderCwd = fs.readlinkSync(`/proc/${pid}/cwd`);
   } catch {}
 
-  let raw: string;
+  let procDir: string[];
   try {
-    raw = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    procDir = fs.readdirSync("/proc");
   } catch {
-    return cwd === null ? null : { pid, cwd, rssBytes: 0, cpuUser: 0, cpuSys: 0 };
+    return null;
   }
 
-  const lastParen = raw.lastIndexOf(")");
-  if (lastParen < 0 || lastParen + 2 >= raw.length) {
-    return cwd === null ? null : { pid, cwd, rssBytes: 0, cpuUser: 0, cpuSys: 0 };
+  let totalRss = 0;
+  let totalUser = 0;
+  let totalSys = 0;
+  let count = 0;
+  const children: {
+    pid: number;
+    name: string;
+    rssBytes: number;
+    cpuUser: number;
+    cpuSys: number;
+  }[] = [];
+
+  for (const entry of procDir) {
+    const entryPid = Number(entry);
+    if (!Number.isInteger(entryPid) || entryPid <= 0) continue;
+    let raw: string;
+    try {
+      raw = fs.readFileSync(`/proc/${entryPid}/stat`, "utf8");
+    } catch {
+      continue;
+    }
+    const row = parseProcStat(raw);
+    if (!row || row.pgrp !== pid) continue;
+
+    const rssBytes = row.rssPages * pageSize;
+    const cpuUser = Math.floor((row.utimeTicks * 1_000_000) / CLK_TCK);
+    const cpuSys = Math.floor((row.stimeTicks * 1_000_000) / CLK_TCK);
+    totalRss += rssBytes;
+    totalUser += cpuUser;
+    totalSys += cpuSys;
+    count += 1;
+
+    if (entryPid !== pid) {
+      children.push({
+        pid: entryPid,
+        name: row.comm.slice(0, 31),
+        rssBytes,
+        cpuUser,
+        cpuSys,
+      });
+    }
   }
 
-  const fields = raw.slice(lastParen + 2).split(" ");
-  // Indices (0-based) after last ')': 11=utime, 12=stime, 21=rss_pages
-  const utime = Number(fields[11] ?? 0);
-  const stime = Number(fields[12] ?? 0);
-  const rssPages = Number(fields[21] ?? 0);
+  if (count === 0) return null;
 
   return {
     pid,
-    cwd,
-    rssBytes: rssPages * getPageSize(),
-    cpuUser: Math.floor((utime * 1_000_000) / CLK_TCK),
-    cpuSys: Math.floor((stime * 1_000_000) / CLK_TCK),
+    cwd: leaderCwd,
+    rssBytes: totalRss,
+    cpuUser: totalUser,
+    cpuSys: totalSys,
+    count,
+    children,
   };
 }
