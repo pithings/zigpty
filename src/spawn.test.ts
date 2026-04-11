@@ -129,9 +129,8 @@ describe("spawn", () => {
 
 describe("stats", () => {
   it("should report pid, rss, and cpu times", async () => {
-    const cmd = isWindows ? [] : [];
     const exe = isWindows ? "cmd.exe" : "/bin/cat";
-    const pty = spawn(exe, cmd);
+    const pty = spawn(exe);
 
     // Give the process a beat to start up and accumulate stats
     await new Promise((r) => setTimeout(r, 100));
@@ -140,15 +139,16 @@ describe("stats", () => {
     expect(stats).not.toBeNull();
     expect(stats!.pid).toBeGreaterThan(0);
     expect(stats!.rssBytes).toBeGreaterThan(0);
-    expect(typeof stats!.cpuUser).toBe("number");
-    expect(typeof stats!.cpuSys).toBe("number");
     expect(stats!.cpuUser).toBeGreaterThanOrEqual(0);
     expect(stats!.cpuSys).toBeGreaterThanOrEqual(0);
 
-    pty.kill(isWindows ? undefined : "SIGTERM");
+    pty.kill();
+    await pty.exited;
   });
 
   it.skipIf(isWindows)("should report cwd on unix", async () => {
+    // macOS resolves /tmp → /private/tmp; pass the canonical path so proc_pidinfo's
+    // PROC_PIDVNODEPATHINFO returns an equal string.
     const tmpDir = process.platform === "darwin" ? "/private/tmp" : "/tmp";
     const pty = spawn("/bin/cat", [], { cwd: tmpDir });
 
@@ -158,7 +158,8 @@ describe("stats", () => {
     expect(stats).not.toBeNull();
     expect(stats!.cwd).toBe(tmpDir);
 
-    pty.kill("SIGTERM");
+    pty.kill();
+    await pty.exited;
   });
 
   it("should return null after close", async () => {
@@ -166,6 +167,7 @@ describe("stats", () => {
     const pty = spawn(exe);
     pty.close();
     expect(pty.stats()).toBeNull();
+    await pty.exited;
   });
 });
 

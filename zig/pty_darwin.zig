@@ -76,6 +76,7 @@ pub fn getStats(fd: posix.fd_t, cwd_buf: []u8) ?lib.Stats {
         .cpu_user_us = 0,
         .cpu_sys_us = 0,
     };
+    var any_field: bool = false;
 
     // PROC_PIDTASKINFO → virtual_size, resident_size, total_user (ns), total_system (ns)
     var task_buf: [PROC_TASKINFO_SIZE]u8 align(8) = undefined;
@@ -86,6 +87,7 @@ pub fn getStats(fd: posix.fd_t, cwd_buf: []u8) ?lib.Stats {
         const total_sys_ns = std.mem.readInt(u64, task_buf[24..32], .little);
         stats.cpu_user_us = total_user_ns / 1000;
         stats.cpu_sys_us = total_sys_ns / 1000;
+        any_field = true;
     }
 
     // PROC_PIDVNODEPATHINFO → cwd path at offset VIP_PATH_OFFSET (MAXPATHLEN bytes, null-terminated)
@@ -97,10 +99,11 @@ pub fn getStats(fd: posix.fd_t, cwd_buf: []u8) ?lib.Stats {
         if (len > 0 and len <= cwd_buf.len) {
             @memcpy(cwd_buf[0..len], path_slice[0..len]);
             stats.cwd = cwd_buf[0..len];
+            any_field = true;
         }
     }
 
-    return stats;
+    return if (any_field) stats else null;
 }
 
 /// Raw exit — bypasses libc's exit() and its atexit handlers.

@@ -394,7 +394,7 @@ fn statsImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value
     if (ctx.spawn_result.process == win.INVALID_HANDLE) return pty.returnUndef(env);
 
     var cwd_buf: [4]u8 = undefined; // unused on Windows
-    const s = win.getStats(ctx.spawn_result.process, &cwd_buf) orelse return pty.returnUndef(env);
+    const s = win.getStats(ctx.spawn_result.process, ctx.spawn_result.pid, &cwd_buf) orelse return pty.returnUndef(env);
 
     return try pty.buildStatsObject(env, s);
 }

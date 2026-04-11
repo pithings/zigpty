@@ -231,8 +231,6 @@ extern "kernel32" fn K32GetProcessMemoryInfo(
     cb: DWORD,
 ) callconv(.c) BOOL;
 
-extern "kernel32" fn GetProcessId(hProcess: HANDLE) callconv(.c) DWORD;
-
 fn filetimeToMicros(ft: FILETIME) u64 {
     // FILETIME is in 100-nanosecond intervals — divide by 10 for microseconds.
     const combined: u64 = (@as(u64, ft.dwHighDateTime) << 32) | @as(u64, ft.dwLowDateTime);
@@ -243,21 +241,23 @@ const lib = @import("lib.zig");
 
 /// Get stats for the spawned shell process (no foreground tracking on Windows).
 /// `cwd_buf` is unused — cwd is always null on Windows (no cheap API for remote proc cwd).
-pub fn getStats(process: HANDLE, cwd_buf: []u8) ?lib.Stats {
+pub fn getStats(process: HANDLE, pid: u32, cwd_buf: []u8) ?lib.Stats {
     _ = cwd_buf;
 
     var stats = lib.Stats{
-        .pid = GetProcessId(process),
+        .pid = pid,
         .cwd = null,
         .rss_bytes = 0,
         .cpu_user_us = 0,
         .cpu_sys_us = 0,
     };
+    var any_field: bool = false;
 
     var pmc = std.mem.zeroes(PROCESS_MEMORY_COUNTERS);
     pmc.cb = @sizeOf(PROCESS_MEMORY_COUNTERS);
     if (K32GetProcessMemoryInfo(process, &pmc, @sizeOf(PROCESS_MEMORY_COUNTERS)) != 0) {
         stats.rss_bytes = pmc.WorkingSetSize;
+        any_field = true;
     }
 
     var creation: FILETIME = undefined;
@@ -267,9 +267,10 @@ pub fn getStats(process: HANDLE, cwd_buf: []u8) ?lib.Stats {
     if (GetProcessTimes(process, &creation, &exit, &kernel, &user) != 0) {
         stats.cpu_user_us = filetimeToMicros(user);
         stats.cpu_sys_us = filetimeToMicros(kernel);
+        any_field = true;
     }
 
-    return stats;
+    return if (any_field) stats else null;
 }
 
 // --- Public API ---

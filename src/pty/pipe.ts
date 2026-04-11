@@ -433,13 +433,30 @@ export class PipePty extends BasePty {
   }
 }
 
-let _clkTck: number | null = null;
-function getClkTck(): number {
-  if (_clkTck !== null) return _clkTck;
-  // Node exposes sysconf(_SC_CLK_TCK) via os.constants? No — fall back to common default.
-  // Reading from /proc/<pid>/stat is in clock ticks; Linux default is 100.
-  _clkTck = 100;
-  return _clkTck;
+// CLK_TCK is 100 on all modern Linux kernels; native path uses sysconf for correctness.
+const CLK_TCK = 100;
+
+let _pageSize: number | null = null;
+function getPageSize(): number {
+  if (_pageSize !== null) return _pageSize;
+  // Parse AT_PAGESZ from /proc/self/auxv — needed for ARM64 Linux with 16K pages.
+  try {
+    const auxv = fs.readFileSync("/proc/self/auxv");
+    const is64 = ["arm64", "x64", "ppc64", "s390x", "mips64el", "riscv64", "loong64"].includes(process.arch);
+    const wordSize = is64 ? 8 : 4;
+    const AT_PAGESZ = 6;
+    const AT_NULL = 0;
+    for (let i = 0; i + wordSize * 2 <= auxv.length; i += wordSize * 2) {
+      const key = is64 ? Number(auxv.readBigUInt64LE(i)) : auxv.readUInt32LE(i);
+      if (key === AT_NULL) break;
+      if (key === AT_PAGESZ) {
+        _pageSize = is64 ? Number(auxv.readBigUInt64LE(i + 8)) : auxv.readUInt32LE(i + 4);
+        return _pageSize;
+      }
+    }
+  } catch {}
+  _pageSize = 4096;
+  return _pageSize;
 }
 
 function readLinuxStats(pid: number): IPtyStats | null {
@@ -448,26 +465,29 @@ function readLinuxStats(pid: number): IPtyStats | null {
     cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
   } catch {}
 
-  let rssBytes = 0;
-  let cpuUser = 0;
-  let cpuSys = 0;
+  let raw: string;
   try {
-    const raw = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-    const lastParen = raw.lastIndexOf(")");
-    if (lastParen >= 0 && lastParen + 2 < raw.length) {
-      const fields = raw.slice(lastParen + 2).split(" ");
-      // Indices (0-based) after last ')': 11=utime, 12=stime, 21=rss_pages
-      const utime = Number(fields[11] ?? 0);
-      const stime = Number(fields[12] ?? 0);
-      const rssPages = Number(fields[21] ?? 0);
-      const clkTck = getClkTck();
-      cpuUser = Math.floor((utime * 1_000_000) / clkTck);
-      cpuSys = Math.floor((stime * 1_000_000) / clkTck);
-      rssBytes = rssPages * 4096;
-    }
+    raw = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
   } catch {
-    return null;
+    return cwd === null ? null : { pid, cwd, rssBytes: 0, cpuUser: 0, cpuSys: 0 };
   }
 
-  return { pid, cwd, rssBytes, cpuUser, cpuSys };
+  const lastParen = raw.lastIndexOf(")");
+  if (lastParen < 0 || lastParen + 2 >= raw.length) {
+    return cwd === null ? null : { pid, cwd, rssBytes: 0, cpuUser: 0, cpuSys: 0 };
+  }
+
+  const fields = raw.slice(lastParen + 2).split(" ");
+  // Indices (0-based) after last ')': 11=utime, 12=stime, 21=rss_pages
+  const utime = Number(fields[11] ?? 0);
+  const stime = Number(fields[12] ?? 0);
+  const rssPages = Number(fields[21] ?? 0);
+
+  return {
+    pid,
+    cwd,
+    rssBytes: rssPages * getPageSize(),
+    cpuUser: Math.floor((utime * 1_000_000) / CLK_TCK),
+    cpuSys: Math.floor((stime * 1_000_000) / CLK_TCK),
+  };
 }

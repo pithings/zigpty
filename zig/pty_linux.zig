@@ -206,34 +206,42 @@ fn statsForPid(pid: posix.pid_t, cwd_buf: []u8) ?lib.Stats {
         .cpu_user_us = 0,
         .cpu_sys_us = 0,
     };
+    var any_field: bool = false;
 
     var path_buf: [64]u8 = undefined;
 
     // Resolve /proc/<pid>/cwd via readlink.
     if (std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid})) |cwd_path| {
         if (std.posix.readlink(cwd_path, cwd_buf)) |link| {
-            if (link.len > 0) stats.cwd = link;
+            if (link.len > 0) {
+                stats.cwd = link;
+                any_field = true;
+            }
         } else |_| {}
     } else |_| {}
 
     // Read /proc/<pid>/stat for cpu + rss.
-    const stat_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch return stats;
-    const f = std.fs.openFileAbsolute(stat_path, .{}) catch return stats;
-    defer f.close();
+    read_stat: {
+        const stat_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch break :read_stat;
+        const f = std.fs.openFileAbsolute(stat_path, .{}) catch break :read_stat;
+        defer f.close();
 
-    var stat_buf: [1024]u8 = undefined;
-    const n = f.read(&stat_buf) catch return stats;
-    if (n == 0) return stats;
+        var stat_buf: [1024]u8 = undefined;
+        const n = f.read(&stat_buf) catch break :read_stat;
+        if (n == 0) break :read_stat;
 
-    parseProcStat(stat_buf[0..n], &stats);
-    return stats;
+        if (parseProcStat(stat_buf[0..n], &stats)) any_field = true;
+    }
+
+    return if (any_field) stats else null;
 }
 
 /// Parse /proc/<pid>/stat. Format: `pid (comm) state ppid ...`
 /// comm can contain spaces/parens, so we skip to the LAST ')' then count fields.
-fn parseProcStat(buf: []const u8, stats: *lib.Stats) void {
-    const last_paren = std.mem.lastIndexOfScalar(u8, buf, ')') orelse return;
-    if (last_paren + 2 >= buf.len) return;
+/// Returns true if any field was populated.
+fn parseProcStat(buf: []const u8, stats: *lib.Stats) bool {
+    const last_paren = std.mem.lastIndexOfScalar(u8, buf, ')') orelse return false;
+    if (last_paren + 2 >= buf.len) return false;
 
     // Fields after last ')': state ppid pgrp session tty_nr tpgid flags
     //   minflt cminflt majflt cmajflt utime stime cutime cstime priority
@@ -264,6 +272,7 @@ fn parseProcStat(buf: []const u8, stats: *lib.Stats) void {
     stats.cpu_user_us = (utime_ticks * 1_000_000) / clk_tck;
     stats.cpu_sys_us = (stime_ticks * 1_000_000) / clk_tck;
     stats.rss_bytes = rss_pages * page_size;
+    return idx >= 21;
 }
 
 /// Ensure libtermux-exec.so is loaded on Termux/Android.
