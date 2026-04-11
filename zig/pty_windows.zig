@@ -244,6 +244,13 @@ const lib = @import("lib.zig");
 /// NtQueryInformationProcess + remote PEB read, which is fragile across
 /// elevation boundaries.
 pub fn getStats(process: HANDLE, pid: u32) ?lib.Stats {
+    // Gate on liveness — GetProcessTimes/K32GetProcessMemoryInfo keep working
+    // on a handle after the process exits, but the docs promise null after exit.
+    const STILL_ACTIVE: DWORD = 259;
+    var exit_code: DWORD = 0;
+    if (GetExitCodeProcess(process, &exit_code) == 0) return null;
+    if (exit_code != STILL_ACTIVE) return null;
+
     var stats = lib.Stats{
         .pid = pid,
         .cwd = null,
