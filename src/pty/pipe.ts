@@ -502,9 +502,10 @@ function parseProcStat(raw: string): ProcStatRow | null {
 
 function readLinuxStats(pid: number): IPtyStats | null {
   const pageSize = getPageSize();
-  // The leader pid acts as the pgrp id (the child was spawned with `detached: true`
-  // so setsid() made it its own session leader). Walk /proc and sum everything
-  // whose pgrp matches.
+  // For shells spawned with `detached: true`, setsid() makes the leader its own
+  // pgrp, so walking /proc by pgrp aggregates the full job. For non-shell commands
+  // (no detached), the child inherits the parent's pgrp, so we always include the
+  // leader pid itself and additionally pick up siblings whose pgrp matches.
   let leaderCwd: string | null = null;
   try {
     leaderCwd = fs.readlinkSync(`/proc/${pid}/cwd`);
@@ -539,7 +540,8 @@ function readLinuxStats(pid: number): IPtyStats | null {
       continue;
     }
     const row = parseProcStat(raw);
-    if (!row || row.pgrp !== pid) continue;
+    if (!row) continue;
+    if (entryPid !== pid && row.pgrp !== pid) continue;
 
     const rssBytes = row.rssPages * pageSize;
     const cpuUser = Math.floor((row.utimeTicks * 1_000_000) / CLK_TCK);

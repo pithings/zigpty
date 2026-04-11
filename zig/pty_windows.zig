@@ -310,6 +310,15 @@ const ProcEntry = struct {
     name_len: u8,
 };
 
+/// Largest length ≤ `max` that ends on a UTF-8 codepoint boundary.
+/// Walks back from `max` past any continuation bytes (top bits 0b10).
+fn utf8TruncateLen(buf: []const u8, max: usize) usize {
+    if (buf.len <= max) return buf.len;
+    var n = max;
+    while (n > 0 and (buf[n] & 0xC0) == 0x80) : (n -= 1) {}
+    return n;
+}
+
 /// Enumerate all processes via Toolhelp32 into a heap-allocated slice.
 /// Caller owns the returned slice and must `allocator.free` it.
 fn snapshotProcesses(allocator: std.mem.Allocator) ![]ProcEntry {
@@ -333,14 +342,15 @@ fn snapshotProcesses(allocator: std.mem.Allocator) ![]ProcEntry {
             .name_len = 0,
         };
 
-        // Convert UTF-16 szExeFile → UTF-8, truncating to fit.
+        // Convert UTF-16 szExeFile → UTF-8, truncating on a codepoint
+        // boundary so non-ASCII names never produce invalid UTF-8.
         // MAX_PATH * 4 = 1040: worst-case UTF-8 expansion of MAX_PATH UTF-16
         // code units (surrogate pair → 4 UTF-8 bytes). Stack-cheap and
         // guarantees the conversion never errors on length.
         const wide_len = std.mem.indexOfScalar(u16, &pe.szExeFile, 0) orelse pe.szExeFile.len;
         var utf8_buf: [MAX_PATH * 4]u8 = undefined;
         const u8_len = std.unicode.utf16LeToUtf8(&utf8_buf, pe.szExeFile[0..wide_len]) catch 0;
-        const copy_len = @min(u8_len, entry.name.len);
+        const copy_len = utf8TruncateLen(utf8_buf[0..u8_len], entry.name.len);
         if (copy_len > 0) @memcpy(entry.name[0..copy_len], utf8_buf[0..copy_len]);
         entry.name_len = @intCast(copy_len);
 
