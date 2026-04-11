@@ -252,17 +252,20 @@ fn parseProcStat(buf: []const u8, stats: *lib.Stats) bool {
     var utime_ticks: u64 = 0;
     var stime_ticks: u64 = 0;
     var rss_pages: u64 = 0;
+    var reached_rss = false;
     while (it.next()) |field| : (idx += 1) {
         switch (idx) {
             11 => utime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
             12 => stime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
             21 => {
                 rss_pages = std.fmt.parseInt(u64, field, 10) catch 0;
+                reached_rss = true;
                 break;
             },
             else => {},
         }
     }
+    if (!reached_rss) return false;
 
     const clk_tck_raw = sysconf(_SC_CLK_TCK);
     const clk_tck: u64 = if (clk_tck_raw > 0) @intCast(clk_tck_raw) else 100;
@@ -272,7 +275,7 @@ fn parseProcStat(buf: []const u8, stats: *lib.Stats) bool {
     stats.cpu_user_us = (utime_ticks * 1_000_000) / clk_tck;
     stats.cpu_sys_us = (stime_ticks * 1_000_000) / clk_tck;
     stats.rss_bytes = rss_pages * page_size;
-    return idx >= 21;
+    return true;
 }
 
 /// Ensure libtermux-exec.so is loaded on Termux/Android.

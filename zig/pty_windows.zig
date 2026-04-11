@@ -240,10 +240,10 @@ fn filetimeToMicros(ft: FILETIME) u64 {
 const lib = @import("lib.zig");
 
 /// Get stats for the spawned shell process (no foreground tracking on Windows).
-/// `cwd_buf` is unused — cwd is always null on Windows (no cheap API for remote proc cwd).
-pub fn getStats(process: HANDLE, pid: u32, cwd_buf: []u8) ?lib.Stats {
-    _ = cwd_buf;
-
+/// cwd is always null on Windows — reading another process's cwd requires
+/// NtQueryInformationProcess + remote PEB read, which is fragile across
+/// elevation boundaries.
+pub fn getStats(process: HANDLE, pid: u32) ?lib.Stats {
     var stats = lib.Stats{
         .pid = pid,
         .cwd = null,

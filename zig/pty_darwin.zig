@@ -54,13 +54,27 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
     return buf[0..len];
 }
 
-// proc_pidinfo flavors
+// proc_pidinfo flavors (from <sys/proc_info.h>)
 const PROC_PIDTASKINFO = 4;
 const PROC_PIDVNODEPATHINFO = 9;
+
+// struct proc_taskinfo layout — total size 96 bytes:
+//   [ 0..  8) pti_virtual_size       u64
+//   [ 8.. 16) pti_resident_size      u64  ← used for rss
+//   [16.. 24) pti_total_user         u64  (nanoseconds)
+//   [24.. 32) pti_total_system       u64  (nanoseconds)
+//   [32.. 96) thread/page/fault counters (unused)
 const PROC_TASKINFO_SIZE = 96;
+
+// struct proc_vnodepathinfo = { pvi_cdir, pvi_rdir } — each a vnode_info_path.
+// struct vnode_info_path = { vip_vi: vnode_info(152), vip_path: [MAXPATHLEN]u8 }.
+// struct vnode_info      = { vi_stat: vinfo_stat(136), vi_type(4), vi_pad(4), vi_fsid: fsid_t(8) } = 152.
+// vinfo_stat breakdown (136 bytes): dev(4) + mode(2) + nlink(2) + ino(8) + uid(4) + gid(4)
+//   + 4×(atime/mtime/ctime/birthtime pair of i64) = 64 + size(8) + blocks(8) + blksize(4)
+//   + flags(4) + gen(4) + rdev(4) + qspare[2] i64 (16) = 136.
+// → Offset of pvi_cdir.vip_path within proc_vnodepathinfo = 152.
+// → Total size = 2 × (152 + 1024) = 2352.
 const PROC_VNODEPATHINFO_SIZE = 2352;
-// Offset of vnode_info_path.vip_path within proc_vnodepathinfo (start of pvi_cdir.vip_path).
-// Layout: vinfo_stat(136) + vi_type(4) + vi_pad(4) + fsid_t(8) = 152
 const VIP_PATH_OFFSET = 152;
 const MAXPATHLEN = 1024;
 

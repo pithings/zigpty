@@ -170,7 +170,7 @@ Available via `lib.win` (re-exports `pty_windows.zig`):
 | `waitForExit`   | `(process) ExitInfo`                                  | Wait for process exit (blocking)         |
 | `killProcess`   | `(process, exit_code) void`                           | Terminate process                        |
 | `closePty`      | `(result) void`                                       | Close all ConPTY handles                 |
-| `getStats`      | `(process, cwd_buf) ?Stats`                           | rss + cpu via K32GetProcessMemoryInfo + GetProcessTimes (no cwd) |
+| `getStats`      | `(process, pid) ?Stats`                               | rss + cpu via K32GetProcessMemoryInfo + GetProcessTimes (no cwd) |
 
 Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `Stats`, `ConPtyError`, `HPCON`, `HANDLE`
 

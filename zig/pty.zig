@@ -85,7 +85,7 @@ pub fn buildStatsObject(env: napi.napi_env, s: lib.Stats) !napi.napi_value {
     try napi.check(env, napi.napi_create_object(env, &obj));
 
     var pid_val: napi.napi_value = undefined;
-    try napi.check(env, napi.napi_create_int32(env, @intCast(s.pid), &pid_val));
+    try napi.check(env, napi.napi_create_int64(env, @intCast(s.pid), &pid_val));
     try napi.setProp(env, obj, "pid", pid_val);
 
     if (s.cwd) |cwd| {

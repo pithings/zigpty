@@ -127,20 +127,24 @@ describe("spawn", () => {
   });
 });
 
+async function pollStats<T>(pty: { stats(): T | null }, predicate: (s: T) => boolean, timeoutMs = 5000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const s = pty.stats();
+    if (s !== null && predicate(s)) return s;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error("pollStats timed out");
+}
+
 describe("stats", () => {
   it("should report pid, rss, and cpu times", async () => {
     const exe = isWindows ? "cmd.exe" : "/bin/cat";
     const pty = spawn(exe);
 
-    // Give the process a beat to start up and accumulate stats
-    await new Promise((r) => setTimeout(r, 100));
-
-    const stats = pty.stats();
-    expect(stats).not.toBeNull();
-    expect(stats!.pid).toBeGreaterThan(0);
-    expect(stats!.rssBytes).toBeGreaterThan(0);
-    expect(stats!.cpuUser).toBeGreaterThanOrEqual(0);
-    expect(stats!.cpuSys).toBeGreaterThanOrEqual(0);
+    const stats = await pollStats(pty, (s) => s.pid > 0 && s.rssBytes > 0);
+    expect(stats.cpuUser).toBeGreaterThanOrEqual(0);
+    expect(stats.cpuSys).toBeGreaterThanOrEqual(0);
 
     pty.kill();
     await pty.exited;
@@ -152,11 +156,8 @@ describe("stats", () => {
     const tmpDir = process.platform === "darwin" ? "/private/tmp" : "/tmp";
     const pty = spawn("/bin/cat", [], { cwd: tmpDir });
 
-    await new Promise((r) => setTimeout(r, 100));
-
-    const stats = pty.stats();
-    expect(stats).not.toBeNull();
-    expect(stats!.cwd).toBe(tmpDir);
+    const stats = await pollStats(pty, (s) => s.cwd === tmpDir);
+    expect(stats.cwd).toBe(tmpDir);
 
     pty.kill();
     await pty.exited;
