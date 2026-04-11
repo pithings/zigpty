@@ -113,21 +113,21 @@ interface IPty {
 
 ### `pty.stats()`
 
-Snapshot OS-level process info aggregated across the PTY's foreground job. `rssBytes`, `cpuUser`, and `cpuSys` are **totals** summed over the leader and every tracked child. `count` is how many processes were rolled into the totals. `children[]` lists each non-leader process (`{pid, name, rssBytes, cpuUser, cpuSys}`) so you can see the breakdown.
+Snapshot OS-level process info aggregated across the spawned process and **every transitive descendant** (BFS by ppid). If you spawn `bash`, the totals cover bash + every command, subshell, background job, pipeline, and grandchild it spawned. `rssBytes`, `cpuUser`, and `cpuSys` are **totals** summed over the leader and every tracked descendant. `count` is how many processes were rolled into the totals. `children[]` lists each non-leader descendant (`{pid, name, rssBytes, cpuUser, cpuSys}`) so you can see the breakdown.
 
-On Unix, aggregation targets the PTY's foreground process group (same target as `pty.process`), so the numbers follow whatever the user is currently running — workers, subshells, build fan-outs. On Windows, the unit is the shell process's transitive descendant tree (ConPTY has no pgrp concept).
+The same descendant-tree model applies on every platform — pgrp/session/job-control juggling doesn't matter, since the walk follows ppid edges. The only thing not tracked is **double-fork daemons** (`nohup`, `setsid` + intermediate exit) that explicitly reparent away to init/launchd.
 
 ```ts
 const pty = spawn("/bin/bash");
 // …user types `cd /tmp && cargo build`…
 const s = pty.stats();
 // {
-//   pid: 4821,               // leader (pgrp on Unix, shell on Windows)
+//   pid: 4821,               // leader (the spawned shell)
 //   cwd: "/tmp",             // leader's cwd; null on Windows
-//   rssBytes: 2_147_483_648, // total across leader + children
+//   rssBytes: 2_147_483_648, // total across leader + descendants
 //   cpuUser: 8_430_000,      // microseconds
 //   cpuSys: 1_250_000,
-//   count: 17,               // leader + 16 workers
+//   count: 17,               // leader + 16 descendants
 //   children: [
 //     { pid: 4822, name: "cargo",   rssBytes: 128_000_000, cpuUser: 500_000, cpuSys: 80_000 },
 //     { pid: 4823, name: "rustc",   rssBytes: 512_000_000, cpuUser: 2_000_000, cpuSys: 300_000 },

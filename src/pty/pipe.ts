@@ -474,7 +474,7 @@ function getPageSize(): number {
 /** Parsed /proc/<pid>/stat row used for aggregation. */
 interface ProcStatRow {
   comm: string;
-  pgrp: number;
+  ppid: number;
   utimeTicks: number;
   stimeTicks: number;
   rssPages: number;
@@ -488,12 +488,12 @@ function parseProcStat(raw: string): ProcStatRow | null {
   }
   const comm = raw.slice(firstParen + 1, lastParen);
   const fields = raw.slice(lastParen + 2).split(" ");
-  // Indices after last ')': 2=pgrp, 11=utime, 12=stime, 21=rss_pages
-  const pgrp = Number(fields[2] ?? 0);
-  if (!Number.isFinite(pgrp)) return null;
+  // Indices after last ')': 1=ppid, 2=pgrp, 11=utime, 12=stime, 21=rss_pages
+  const ppid = Number(fields[1] ?? 0);
+  if (!Number.isFinite(ppid)) return null;
   return {
     comm,
-    pgrp,
+    ppid,
     utimeTicks: Number(fields[11] ?? 0),
     stimeTicks: Number(fields[12] ?? 0),
     rssPages: Number(fields[21] ?? 0),
@@ -502,10 +502,7 @@ function parseProcStat(raw: string): ProcStatRow | null {
 
 function readLinuxStats(pid: number): IPtyStats | null {
   const pageSize = getPageSize();
-  // For shells spawned with `detached: true`, setsid() makes the leader its own
-  // pgrp, so walking /proc by pgrp aggregates the full job. For non-shell commands
-  // (no detached), the child inherits the parent's pgrp, so we always include the
-  // leader pid itself and additionally pick up siblings whose pgrp matches.
+
   let leaderCwd: string | null = null;
   try {
     leaderCwd = fs.readlinkSync(`/proc/${pid}/cwd`);
@@ -516,6 +513,48 @@ function readLinuxStats(pid: number): IPtyStats | null {
     procDir = fs.readdirSync("/proc");
   } catch {
     return null;
+  }
+
+  // Snapshot every pid's stat row, then BFS from `pid` along ppid edges.
+  // Matches the native getStats model — catches background jobs, subshells,
+  // and anything else the leader spawned regardless of pgrp juggling.
+  const rows = new Map<number, ProcStatRow>();
+  for (const entry of procDir) {
+    const entryPid = Number(entry);
+    if (!Number.isInteger(entryPid) || entryPid <= 0) continue;
+    let raw: string;
+    try {
+      raw = fs.readFileSync(`/proc/${entryPid}/stat`, "utf8");
+    } catch {
+      continue;
+    }
+    const row = parseProcStat(raw);
+    if (!row) continue;
+    rows.set(entryPid, row);
+  }
+
+  if (!rows.has(pid)) return null;
+
+  // ppid → [pid] index for O(1) child lookup during BFS.
+  const byParent = new Map<number, number[]>();
+  for (const [childPid, row] of rows) {
+    const bucket = byParent.get(row.ppid);
+    if (bucket) bucket.push(childPid);
+    else byParent.set(row.ppid, [childPid]);
+  }
+
+  const marked = new Set<number>();
+  const queue: number[] = [pid];
+  marked.add(pid);
+  while (queue.length > 0) {
+    const parent = queue.shift()!;
+    const kids = byParent.get(parent);
+    if (!kids) continue;
+    for (const kid of kids) {
+      if (marked.has(kid)) continue;
+      marked.add(kid);
+      queue.push(kid);
+    }
   }
 
   let totalRss = 0;
@@ -530,19 +569,9 @@ function readLinuxStats(pid: number): IPtyStats | null {
     cpuSys: number;
   }[] = [];
 
-  for (const entry of procDir) {
-    const entryPid = Number(entry);
-    if (!Number.isInteger(entryPid) || entryPid <= 0) continue;
-    let raw: string;
-    try {
-      raw = fs.readFileSync(`/proc/${entryPid}/stat`, "utf8");
-    } catch {
-      continue;
-    }
-    const row = parseProcStat(raw);
+  for (const markedPid of marked) {
+    const row = rows.get(markedPid);
     if (!row) continue;
-    if (entryPid !== pid && row.pgrp !== pid) continue;
-
     const rssBytes = row.rssPages * pageSize;
     const cpuUser = Math.floor((row.utimeTicks * 1_000_000) / CLK_TCK);
     const cpuSys = Math.floor((row.stimeTicks * 1_000_000) / CLK_TCK);
@@ -551,9 +580,9 @@ function readLinuxStats(pid: number): IPtyStats | null {
     totalSys += cpuSys;
     count += 1;
 
-    if (entryPid !== pid) {
+    if (markedPid !== pid) {
       children.push({
-        pid: entryPid,
+        pid: markedPid,
         name: row.comm.slice(0, 31),
         rssBytes,
         cpuUser,

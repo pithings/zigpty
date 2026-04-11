@@ -95,14 +95,16 @@ pub const ChildStats = struct {
 };
 
 /// Aggregated process stats for a PTY.
-/// Unix: aggregates the PTY's foreground process group.
-/// Windows: aggregates the shell process and its descendant tree.
+/// Aggregates the leader process and every transitive descendant (by ppid)
+/// on all platforms. Catches background jobs, subshells, and anything else
+/// the leader spawned, regardless of pgrp/session/job-control juggling.
+/// Double-fork daemons that reparent away from the leader fall out of the
+/// tree (expected — they detached on purpose).
 ///
 /// Top-level `rss_bytes`/`cpu_user_us`/`cpu_sys_us` are totals across all
 /// aggregated processes (leader + children). `pid`/`cwd` refer to the leader
-/// (foreground pgrp leader on Unix, shell process on Windows). `children`
-/// lists all non-leader processes that were aggregated; `count` is the total
-/// number of processes (children.len + 1).
+/// process (the spawned shell). `children` lists all non-leader descendants
+/// aggregated; `count` is the total number of processes (children.len + 1).
 ///
 /// `cwd` is a slice into the caller-provided buffer — null on Windows.
 /// `children` is owned by the caller's allocator — call `deinit` to free.
@@ -245,8 +247,8 @@ fn getProcessNameUnix(fd: std.posix.fd_t, buf: []u8) ?[]const u8 {
     return platform.getProcessName(fd, buf);
 }
 
-fn getStatsUnix(fd: std.posix.fd_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?Stats {
-    return platform.getStats(fd, allocator, cwd_buf);
+fn getStatsUnix(pid: std.posix.pid_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?Stats {
+    return platform.getStats(pid, allocator, cwd_buf);
 }
 
 fn waitForExitUnix(pid: std.posix.pid_t) ExitInfo {

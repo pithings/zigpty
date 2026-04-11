@@ -144,14 +144,14 @@ The native loader (`napi.ts`) tries glibc first, falls back to musl on Linux. On
 
 The pure Zig library (`lib.zig`) is exposed as the `"zigpty"` module in `build.zig`:
 
-| Function         | Signature                                  | Description                                                                                                                                                                                                                                              |
-| ---------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `forkPty`        | `(ForkOptions) !ForkResult`                | Fork process with PTY (forkpty + signal handling + execvpe)                                                                                                                                                                                              |
-| `openPty`        | `(cols, rows) !OpenResult`                 | Open bare PTY pair                                                                                                                                                                                                                                       |
-| `resize`         | `(fd, cols, rows, x_pixel, y_pixel) !void` | Resize PTY (ioctl TIOCSWINSZ)                                                                                                                                                                                                                            |
-| `getProcessName` | `(fd, buf) ?[]const u8`                    | Foreground process name via /proc                                                                                                                                                                                                                        |
-| `getStats`       | `(fd, allocator, cwd_buf) ?Stats`          | Aggregate rss + cpu across every process in the foreground pgrp. Linux: walks `/proc` filtering by pgrp. macOS: `proc_listpids(PROC_PGRP_ONLY)` + `proc_pidinfo`. Returns leader cwd + totals + per-child array (caller must `stats.deinit(allocator)`). |
-| `waitForExit`    | `(pid) ExitInfo`                           | Blocking wait for child exit (call from background thread)                                                                                                                                                                                               |
+| Function         | Signature                                  | Description                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `forkPty`        | `(ForkOptions) !ForkResult`                | Fork process with PTY (forkpty + signal handling + execvpe)                                                                                                                                                                                                                                                                                                                                                      |
+| `openPty`        | `(cols, rows) !OpenResult`                 | Open bare PTY pair                                                                                                                                                                                                                                                                                                                                                                                               |
+| `resize`         | `(fd, cols, rows, x_pixel, y_pixel) !void` | Resize PTY (ioctl TIOCSWINSZ)                                                                                                                                                                                                                                                                                                                                                                                    |
+| `getProcessName` | `(fd, buf) ?[]const u8`                    | Foreground process name via /proc                                                                                                                                                                                                                                                                                                                                                                                |
+| `getStats`       | `(pid, allocator, cwd_buf) ?Stats`         | Aggregate rss + cpu across the leader process and every transitive descendant (BFS by ppid). Linux: snapshots `/proc/<pid>/stat` rows once, BFS from leader by linear ppid scan. macOS: `proc_listpids(PROC_ALL_PIDS)` + `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)` for the parent walk, `PROC_PIDTASKINFO` for marked pids. Returns leader cwd + totals + per-child array (caller must `stats.deinit(allocator)`). |
+| `waitForExit`    | `(pid) ExitInfo`                           | Blocking wait for child exit (call from background thread)                                                                                                                                                                                                                                                                                                                                                       |
 
 Types: `ForkOptions`, `ForkResult`, `OpenResult`, `ExitInfo`, `Stats`, `ChildStats`, `PtyError`, `Fd`, `Pid`
 
@@ -178,13 +178,13 @@ Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `Stats`, `ChildStats`, `ConPtyE
 
 ### Unix Exports
 
-| Export    | Signature                                                                        | Implementation                           |
-| --------- | -------------------------------------------------------------------------------- | ---------------------------------------- |
-| `fork`    | `(file, args[], env[], cwd, cols, rows, uid, gid, utf8, cb)` → `{fd, pid, pty}`  | `lib.forkPty()` + thread `waitForExit()` |
-| `open`    | `(cols, rows)` → `{master, slave, pty}`                                          | `lib.openPty()`                          |
-| `resize`  | `(fd, cols, rows)` → void                                                        | `lib.resize()`                           |
-| `process` | `(fd)` → string                                                                  | `lib.getProcessName()`                   |
-| `stats`   | `(fd)` → `{pid, cwd, rssBytes, cpuUser, cpuSys, count, children[]}` \| undefined | `lib.getStats()` (aggregates full pgrp)  |
+| Export    | Signature                                                                         | Implementation                                              |
+| --------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `fork`    | `(file, args[], env[], cwd, cols, rows, uid, gid, utf8, cb)` → `{fd, pid, pty}`   | `lib.forkPty()` + thread `waitForExit()`                    |
+| `open`    | `(cols, rows)` → `{master, slave, pty}`                                           | `lib.openPty()`                                             |
+| `resize`  | `(fd, cols, rows)` → void                                                         | `lib.resize()`                                              |
+| `process` | `(fd)` → string                                                                   | `lib.getProcessName()`                                      |
+| `stats`   | `(pid)` → `{pid, cwd, rssBytes, cpuUser, cpuSys, count, children[]}` \| undefined | `lib.getStats()` (aggregates leader + ppid descendant tree) |
 
 ### Windows Exports
 
@@ -229,16 +229,18 @@ Options: `{ timeout?: number }` (default: 30s). Throws on timeout.
 
 ### `stats()`
 
-On-demand snapshot of OS-level process info for the PTY. Returns `{pid, cwd, rssBytes, cpuUser, cpuSys, count, children}` or `null`. `rssBytes`/`cpuUser`/`cpuSys` are **totals** aggregated across the leader and every tracked child. `count` is the total number of processes that were rolled into the totals. `children[]` contains one entry per non-leader process (`{pid, name, rssBytes, cpuUser, cpuSys}`). CPU times are in microseconds, `rssBytes` is resident set size.
+On-demand snapshot of OS-level process info for the PTY. Returns `{pid, cwd, rssBytes, cpuUser, cpuSys, count, children}` or `null`. `rssBytes`/`cpuUser`/`cpuSys` are **totals** aggregated across the leader and every tracked child. `count` is the total number of processes that were rolled into the totals. `children[]` contains one entry per non-leader descendant (`{pid, name, rssBytes, cpuUser, cpuSys}`). CPU times are in microseconds, `rssBytes` is resident set size.
 
-- **Linux**: walks `/proc/*/stat` and aggregates every process whose `pgrp` matches `tcgetpgrp(fd)`. Covers the full foreground job (workers, subshells) as long as they don't `setpgid` away. Leader `cwd` comes from `readlink(/proc/<pgrp>/cwd)`.
-- **macOS**: `proc_listpids(PROC_PGRP_ONLY, pgrp, ...)` enumerates pids in the pgrp, then `proc_pidinfo(PROC_PIDTASKINFO)` provides rss + cpu per pid. Child names via `proc_name`. Leader `cwd` via `proc_pidinfo(PROC_PIDVNODEPATHINFO)`.
-- **Windows**: no pgrp concept under ConPTY, so the unit is the **descendant tree**. `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` snapshots every running process, then transitive descendants of the shell are marked and enumerated. Per-descendant rss + cpu via `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `K32GetProcessMemoryInfo` + `GetProcessTimes`. `cwd` is always `null` — reading another process's cwd requires `NtQueryInformationProcess` + remote PEB read, which is fragile across elevation boundaries.
-- **PipePty** (fallback): Linux-only. Walks `/proc` and filters by `pgrp == child_pid` (same aggregation as native). Returns `null` on other platforms.
+The **aggregation unit is the leader's transitive descendant tree** on every platform — BFS from the spawned process pid (e.g. `bash`) along ppid edges. Catches background jobs, subshells, pipelines, and grandchildren regardless of pgrp/session/job-control juggling. **Double-fork daemons** (`nohup`, `setsid` + intermediate exit) reparent to init/launchd and fall out of the tree — that's intentional, since they explicitly detached.
 
-No background thread — stats are pulled only when called. Returns `null` after close, when the process has exited, or when the walk finds no matching processes.
+- **Linux**: snapshots `/proc/*/stat` rows once into a list, BFS from `leader_pid` by linear-scanning unmarked entries for matching ppid (O(N²) in proc count, fine for typical trees). Aggregates rss (`rss_pages * page_size`) and cpu (`utime/stime ticks`) for every marked pid. Leader `cwd` via `readlink(/proc/<leader_pid>/cwd)`.
+- **macOS**: `proc_listpids(PROC_ALL_PIDS)` snapshots every pid; `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)` (64 bytes per pid) yields ppid + comm for the BFS. For marked pids, `proc_pidinfo(PROC_PIDTASKINFO)` provides rss + cpu (mach absolute time → microseconds via `mach_timebase_info`). Leader `cwd` via `proc_pidinfo(PROC_PIDVNODEPATHINFO)`. Comm name comes from SHORTBSDINFO, no separate `proc_name` call.
+- **Windows**: `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` snapshots every running process; transitive descendants of the shell are BFS-marked. Per-descendant rss + cpu via `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `K32GetProcessMemoryInfo` + `GetProcessTimes`. `cwd` is always `null` — reading another process's cwd requires `NtQueryInformationProcess` + remote PEB read, which is fragile across elevation boundaries.
+- **PipePty** (fallback): Linux-only. Snapshots `/proc/*/stat` into a `Map`, builds a ppid index, BFS from `child_pid` — same algorithm as native. Returns `null` on other platforms.
 
-Name field caveats: Unix `proc_name`/`/proc/<pid>/stat` truncates to 15 chars; Windows `szExeFile` allows up to ~31 chars (we truncate to 31). On macOS, Apple-shipped `sleep` / `ls` etc. have a `g`-prefixed `comm` (e.g. `gsleep`) when invoked via symlink — that is the kernel's view, not a bug.
+No background thread — stats are pulled only when called. Returns `null` after close, when the process has exited, or when the leader is no longer in the snapshot.
+
+Name field caveats: Unix comm (`/proc/<pid>/stat` on Linux, `pbsi_comm` on macOS) truncates to 15 chars; Windows `szExeFile` allows up to ~31 chars (we truncate to 31). On macOS, Apple-shipped `sleep` / `ls` etc. have a `g`-prefixed `comm` (e.g. `gsleep`) when invoked via symlink — that is the kernel's view, not a bug.
 
 ### Terminal API (Bun-compatible)
 

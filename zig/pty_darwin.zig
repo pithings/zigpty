@@ -8,7 +8,6 @@ extern fn tcgetpgrp(fd: c_int) c_int;
 extern fn sysctl(name: [*]c_int, namelen: c_uint, oldp: ?*anyopaque, oldlenp: ?*usize, newp: ?*const anyopaque, newlen: usize) c_int;
 extern fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *anyopaque, buffersize: c_int) c_int;
 extern fn proc_listpids(type: u32, typeinfo: u32, buffer: ?*anyopaque, buffersize: c_int) c_int;
-extern fn proc_name(pid: c_int, buffer: *anyopaque, buffersize: u32) c_int;
 
 const MachTimebaseInfo = extern struct { numer: u32, denom: u32 };
 extern fn mach_timebase_info(info: *MachTimebaseInfo) c_int;
@@ -79,7 +78,6 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
 
     // p_comm is at offset 243 in kinfo_proc.kp_proc on macOS (both arm64 and x86_64).
     const P_COMM_OFFSET = 243;
-    const MAXCOMLEN = 16;
     if (size < P_COMM_OFFSET + MAXCOMLEN) return null;
 
     // Bounded scan — p_comm is at most MAXCOMLEN bytes, avoid reading past buffer
@@ -94,6 +92,22 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
 // proc_pidinfo flavors (from <sys/proc_info.h>)
 const PROC_PIDTASKINFO = 4;
 const PROC_PIDVNODEPATHINFO = 9;
+const PROC_PIDT_SHORTBSDINFO = 13;
+
+// proc_bsdshortinfo layout — total size 64 bytes:
+//   [ 0..  4) pbsi_pid         u32
+//   [ 4..  8) pbsi_ppid        u32     ← used for parent walk
+//   [ 8.. 12) pbsi_pgid        u32
+//   [12.. 16) pbsi_status      u32
+//   [16.. 32) pbsi_comm        char[MAXCOMLEN] (16)   ← truncated comm name
+//   [32.. 36) pbsi_flags       u32
+//   [36.. 40) pbsi_uid         u32
+//   [40.. 44) pbsi_gid         u32
+//   [44.. 64) {ruid,rgid,svuid,svgid,rfu}
+const PROC_SHORTBSDINFO_SIZE = 64;
+const PBSI_PPID_OFFSET = 4;
+const PBSI_COMM_OFFSET = 16;
+const MAXCOMLEN = 16;
 
 // struct proc_taskinfo layout — total size 96 bytes:
 //   [ 0..  8) pti_virtual_size       u64
@@ -122,7 +136,15 @@ const MAXPATHLEN = 1024;
 
 // proc_listpids flavors (from <libproc.h>):
 //   PROC_ALL_PIDS=1, PROC_PGRP_ONLY=2, PROC_TTY_ONLY=3, PROC_UID_ONLY=4, PROC_RUID_ONLY=5
-const PROC_PGRP_ONLY: u32 = 2;
+const PROC_ALL_PIDS: u32 = 1;
+
+/// Snapshot entry for the pid → ppid tree walk.
+const ProcEntry = struct {
+    pid: c_int,
+    ppid: c_int,
+    comm: [MAXCOMLEN]u8,
+    comm_len: u8,
+};
 
 /// Fetch per-process rss + cpu via PROC_PIDTASKINFO. Returns null if the call
 /// fails (process exited) or the layout check fails.
@@ -137,80 +159,154 @@ fn taskInfo(pid: c_int) ?struct { rss: u64, user_us: u64, sys_us: u64 } {
     };
 }
 
-/// Get aggregated stats for the PTY's foreground process group.
-/// Enumerates every process in the pgrp via proc_listpids(PROC_PGRP_ONLY),
-/// sums rss + cpu, and returns per-process info in `children`.
-pub fn getStats(fd: posix.fd_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?lib.Stats {
-    const pgrp = tcgetpgrp(@intCast(fd));
-    if (pgrp < 0) return null;
+/// Fetch ppid + truncated comm via PROC_PIDT_SHORTBSDINFO. ~60% cheaper than
+/// the full PROC_PIDTBSDINFO struct (~216 bytes), and we only need the first
+/// 32 bytes here.
+fn shortBsdInfo(pid: c_int) ?struct { ppid: c_int, comm: [MAXCOMLEN]u8, comm_len: u8 } {
+    var buf: [PROC_SHORTBSDINFO_SIZE]u8 align(8) = undefined;
+    const rc = proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &buf, PROC_SHORTBSDINFO_SIZE);
+    if (rc != PROC_SHORTBSDINFO_SIZE) return null;
 
+    const ppid = std.mem.readInt(u32, buf[PBSI_PPID_OFFSET..][0..4], .little);
+    var comm: [MAXCOMLEN]u8 = undefined;
+    @memcpy(&comm, buf[PBSI_COMM_OFFSET..][0..MAXCOMLEN]);
+    const comm_len = std.mem.indexOfScalar(u8, &comm, 0) orelse MAXCOMLEN;
+    return .{ .ppid = @intCast(ppid), .comm = comm, .comm_len = @intCast(comm_len) };
+}
+
+/// Enumerate every pid on the system via proc_listpids(PROC_ALL_PIDS) with
+/// buffer-grow retry, then pull ppid + comm for each via SHORTBSDINFO.
+fn snapshotProcesses(allocator: std.mem.Allocator) ?[]ProcEntry {
     // proc_listpids returns bytes written. When the result equals the buffer
     // size, the list was probably truncated — retry on the heap with a bigger
     // buffer until the kernel reports fewer bytes than we handed it.
-    const stack_cap: usize = 512;
+    const stack_cap: usize = 1024;
     var stack_buf: [stack_cap]c_int = undefined;
     var pids: []c_int = stack_buf[0..];
     var heap_pids: ?[]c_int = null;
     defer if (heap_pids) |h| allocator.free(h);
 
-    var got_bytes = proc_listpids(PROC_PGRP_ONLY, @intCast(pgrp), pids.ptr, @intCast(pids.len * @sizeOf(c_int)));
+    var got_bytes = proc_listpids(PROC_ALL_PIDS, 0, pids.ptr, @intCast(pids.len * @sizeOf(c_int)));
     if (got_bytes <= 0) return null;
 
     // proc_listpids only reports bytes written, so an exact-fill is
-    // indistinguishable from truncation — we may retry one extra time on a
-    // perfectly-fitted buffer. Cap at 65536 pids (256KB on the heap) since no
-    // realistic foreground job has that many processes; beyond the cap we
-    // accept a truncated view.
+    // indistinguishable from truncation — retry on a perfectly-fitted buffer.
+    // Cap at 65536 pids (256KB on the heap); beyond the cap we accept a
+    // truncated view rather than returning null.
     var cap: usize = stack_cap;
     while (@as(usize, @intCast(got_bytes)) >= cap * @sizeOf(c_int) and cap < 65536) {
-        cap *= 4;
+        const new_cap = cap * 4;
+        // Allocate the NEW buffer before freeing the old one, so `pids` never
+        // dangles on an OOM.
+        const h = allocator.alloc(c_int, new_cap) catch break;
         if (heap_pids) |old| allocator.free(old);
-        heap_pids = null;
-        // On alloc failure, fall through with the previous (truncated) result
-        // — `pids` still points at the prior buffer and `got_bytes` reflects
-        // its content, so we degrade to a partial enumeration instead of
-        // returning null.
-        const h = allocator.alloc(c_int, cap) catch break;
         heap_pids = h;
         pids = h;
-        got_bytes = proc_listpids(PROC_PGRP_ONLY, @intCast(pgrp), h.ptr, @intCast(h.len * @sizeOf(c_int)));
+        cap = new_cap;
+        got_bytes = proc_listpids(PROC_ALL_PIDS, 0, h.ptr, @intCast(h.len * @sizeOf(c_int)));
         if (got_bytes <= 0) return null;
     }
 
     const num_pids: usize = @intCast(@divTrunc(got_bytes, @sizeOf(c_int)));
     if (num_pids == 0) return null;
 
-    var children = std.ArrayListUnmanaged(lib.ChildStats){};
-    errdefer children.deinit(allocator);
-
-    var total_rss: u64 = 0;
-    var total_user: u64 = 0;
-    var total_sys: u64 = 0;
-    var count: u32 = 0;
+    var entries = std.ArrayListUnmanaged(ProcEntry){};
+    errdefer entries.deinit(allocator);
+    entries.ensureTotalCapacity(allocator, num_pids) catch {};
 
     for (pids[0..num_pids]) |pid| {
         if (pid <= 0) continue;
-        const ti = taskInfo(pid) orelse continue;
+        const info = shortBsdInfo(pid) orelse continue;
+        entries.append(allocator, .{
+            .pid = pid,
+            .ppid = info.ppid,
+            .comm = info.comm,
+            .comm_len = info.comm_len,
+        }) catch break;
+    }
 
-        if (pid == pgrp) {
-            total_rss += ti.rss;
-            total_user += ti.user_us;
-            total_sys += ti.sys_us;
-            count += 1;
-        } else {
+    return entries.toOwnedSlice(allocator) catch null;
+}
+
+/// Get aggregated stats for the leader process and its descendant tree.
+/// Snapshots every pid on the system, walks the ppid graph from `leader_pid`,
+/// and sums rss + cpu across every transitive descendant (including the
+/// leader). Catches background jobs, subshells, and anything else the leader
+/// spawned, regardless of pgrp or session juggling. Double-fork daemons that
+/// reparent to launchd fall out of the tree (expected — they detached).
+pub fn getStats(leader_pid: posix.pid_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?lib.Stats {
+    if (leader_pid <= 0) return null;
+
+    // Leader rss + cpu first — gates liveness and keeps the common case (no
+    // descendants) cheap (just two proc_pidinfo calls).
+    const leader_ti = taskInfo(@intCast(leader_pid)) orelse return null;
+
+    var children = std.ArrayListUnmanaged(lib.ChildStats){};
+    errdefer children.deinit(allocator);
+
+    var total_rss: u64 = leader_ti.rss;
+    var total_user: u64 = leader_ti.user_us;
+    var total_sys: u64 = leader_ti.sys_us;
+    var count: u32 = 1;
+
+    // Best-effort descendant aggregation. Any failure along the way falls
+    // through to the end of the block — leader-only stats still get returned.
+    descendants: {
+        const entries = snapshotProcesses(allocator) orelse break :descendants;
+        defer allocator.free(entries);
+        if (entries.len == 0) break :descendants;
+
+        const marked = allocator.alloc(bool, entries.len) catch break :descendants;
+        defer allocator.free(marked);
+        @memset(marked, false);
+
+        var leader_idx: ?usize = null;
+        for (entries, 0..) |e, i| {
+            if (e.pid == leader_pid) {
+                leader_idx = i;
+                break;
+            }
+        }
+        const li = leader_idx orelse break :descendants;
+
+        var queue = std.ArrayListUnmanaged(usize){};
+        defer queue.deinit(allocator);
+
+        marked[li] = true;
+        queue.append(allocator, li) catch break :descendants;
+
+        // BFS. For each parent pop, linear-scan for unmarked children. For
+        // typical descendant trees (few dozen procs) this is fine.
+        var head: usize = 0;
+        while (head < queue.items.len) : (head += 1) {
+            const parent_pid = entries[queue.items[head]].pid;
+            for (entries, 0..) |e, i| {
+                if (marked[i]) continue;
+                if (e.ppid != parent_pid) continue;
+                marked[i] = true;
+                queue.append(allocator, i) catch break :descendants;
+            }
+        }
+
+        for (entries, 0..) |e, i| {
+            if (!marked[i]) continue;
+            if (e.pid == leader_pid) continue;
+
+            const ti = taskInfo(e.pid) orelse continue;
+
             var child = lib.ChildStats{
-                .pid = pid,
+                .pid = e.pid,
                 .name = undefined,
                 .name_len = 0,
                 .rss_bytes = ti.rss,
                 .cpu_user_us = ti.user_us,
                 .cpu_sys_us = ti.sys_us,
             };
-            // proc_name returns bytes written (not including null).
-            // Use full ChildStats.name capacity; proc_name truncates to 15 anyway.
-            const n = proc_name(pid, &child.name, child.name.len);
-            if (n > 0) child.name_len = @intCast(@min(@as(c_int, @intCast(child.name.len)), n));
+            const nl = @min(e.comm_len, child.name.len);
+            if (nl > 0) @memcpy(child.name[0..nl], e.comm[0..nl]);
+            child.name_len = @intCast(nl);
             children.append(allocator, child) catch continue;
+
             total_rss += ti.rss;
             total_user += ti.user_us;
             total_sys += ti.sys_us;
@@ -218,15 +314,10 @@ pub fn getStats(fd: posix.fd_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?li
         }
     }
 
-    if (count == 0) {
-        children.deinit(allocator);
-        return null;
-    }
-
     // Resolve leader cwd via PROC_PIDVNODEPATHINFO.
     var leader_cwd: ?[]const u8 = null;
     var vpi_buf: [PROC_VNODEPATHINFO_SIZE]u8 align(8) = undefined;
-    const vpi_rc = proc_pidinfo(pgrp, PROC_PIDVNODEPATHINFO, 0, &vpi_buf, PROC_VNODEPATHINFO_SIZE);
+    const vpi_rc = proc_pidinfo(@intCast(leader_pid), PROC_PIDVNODEPATHINFO, 0, &vpi_buf, PROC_VNODEPATHINFO_SIZE);
     if (vpi_rc == PROC_VNODEPATHINFO_SIZE) {
         const path_slice = vpi_buf[VIP_PATH_OFFSET..][0..MAXPATHLEN];
         const len = std.mem.indexOfScalar(u8, path_slice, 0) orelse MAXPATHLEN;
@@ -241,7 +332,7 @@ pub fn getStats(fd: posix.fd_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?li
         break :blk &[_]lib.ChildStats{};
     };
     return lib.Stats{
-        .pid = pgrp,
+        .pid = leader_pid,
         .cwd = leader_cwd,
         .rss_bytes = total_rss,
         .cpu_user_us = total_user,

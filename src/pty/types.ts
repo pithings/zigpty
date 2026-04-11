@@ -22,22 +22,22 @@ export interface IPtyChildStats {
 }
 
 export interface IPtyStats {
-  /** Leader PID. On Unix this is the foreground process group of the PTY; on Windows it's the spawned shell process. */
+  /** Leader PID — the spawned process (e.g. the shell). */
   pid: number;
   /** Leader's current working directory. `null` when unavailable (always on Windows, or when the process has exited). */
   cwd: string | null;
-  /** Total resident set size (physical memory) in bytes, aggregated across leader + children. */
+  /** Total resident set size (physical memory) in bytes, aggregated across leader + descendants. */
   rssBytes: number;
-  /** Total accumulated user-mode CPU time in microseconds, aggregated across leader + children. */
+  /** Total accumulated user-mode CPU time in microseconds, aggregated across leader + descendants. */
   cpuUser: number;
-  /** Total accumulated system-mode CPU time in microseconds, aggregated across leader + children. */
+  /** Total accumulated system-mode CPU time in microseconds, aggregated across leader + descendants. */
   cpuSys: number;
-  /** Total number of processes aggregated (leader + children). Always `>= 1`. */
+  /** Total number of processes aggregated (leader + descendants). Always `>= 1`. */
   count: number;
   /**
-   * Non-leader processes aggregated into the totals.
-   * - Unix: every other process in the foreground process group.
-   * - Windows: every transitive descendant of the shell process.
+   * Non-leader transitive descendants (BFS by ppid) aggregated into the totals.
+   * Catches background jobs, subshells, pipelines, and grandchildren of the leader.
+   * Double-fork daemons that reparent to init/launchd are not tracked.
    */
   children: IPtyChildStats[];
 }
@@ -77,7 +77,7 @@ export interface IPty {
   close(): void;
   /** Wait until the output contains the given string. Resolves with all output collected so far. */
   waitFor(pattern: string, options?: { timeout?: number }): Promise<string>;
-  /** Snapshot OS-level stats (cwd, memory, CPU time) for the PTY's foreground process. Returns null when unavailable. */
+  /** Snapshot OS-level stats (cwd, memory, CPU time) aggregated across the leader process and every transitive descendant. Returns null when unavailable. */
   stats(): IPtyStats | null;
 }
 

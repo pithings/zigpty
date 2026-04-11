@@ -40,7 +40,7 @@ export interface INativeUnix {
 
   process(fd: number): string | undefined;
 
-  stats(fd: number): INativeStats | undefined;
+  stats(pid: number): INativeStats | undefined;
 }
 
 export interface INativeWindows {

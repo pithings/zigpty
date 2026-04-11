@@ -187,43 +187,50 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
     return if (std.mem.lastIndexOfScalar(u8, cmd, '/')) |p| cmd[p + 1 ..] else cmd;
 }
 
-/// Parsed fields from /proc/<pid>/stat.
+/// Parsed fields from /proc/<pid>/stat. `comm` is copied into a fixed buffer
+/// so the source read buffer can be reused for the next pid.
 const ProcStat = struct {
-    pgrp: posix.pid_t,
-    comm: []const u8, // slice into source buffer
+    ppid: posix.pid_t,
+    comm: [16]u8,
+    comm_len: u8,
     utime_ticks: u64,
     stime_ticks: u64,
     rss_pages: u64,
 };
 
-/// Get aggregated stats for the PTY's foreground process group.
-/// Walks /proc and sums rss+cpu across every process whose pgrp matches
-/// `tcgetpgrp(fd)`. The leader is the pgrp id itself. `children` (owned by
-/// `allocator`) lists every other process in the pgrp.
-pub fn getStats(fd: posix.fd_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?lib.Stats {
-    const pgrp = tcgetpgrp(@intCast(fd));
-    if (pgrp < 0) return null;
+/// Snapshot entry for the pid → ppid tree walk.
+const ProcEntry = struct {
+    pid: posix.pid_t,
+    stat: ProcStat,
+};
+
+/// Get aggregated stats for the leader process and its descendant tree.
+/// Walks /proc once, builds a pid/ppid index, BFS from `leader_pid`, and
+/// sums rss + cpu across every transitive descendant (including the leader).
+/// Catches background jobs, subshells, and anything else the leader spawned,
+/// regardless of pgrp/session/job-control juggling. Double-fork daemons that
+/// reparent to init fall out of the tree (expected — they detached).
+pub fn getStats(leader_pid: posix.pid_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?lib.Stats {
+    if (leader_pid <= 0) return null;
 
     const clk_tck: u64 = 100;
     const page_size = getPageSize();
 
-    var children = std.ArrayListUnmanaged(lib.ChildStats){};
-    errdefer children.deinit(allocator);
-
-    var total_rss: u64 = 0;
-    var total_user: u64 = 0;
-    var total_sys: u64 = 0;
-    var count: u32 = 0;
+    // Leader cwd — readlink on /proc/<pid>/cwd. Used as a liveness gate too:
+    // if this fails the process is probably gone, but we still try the walk
+    // since the child could have reparented.
     var leader_cwd: ?[]const u8 = null;
-
-    // Resolve leader cwd first — this is the one field that still refers only
-    // to the foreground pgrp leader.
     var path_buf: [64]u8 = undefined;
-    if (std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pgrp})) |cwd_path| {
+    if (std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{leader_pid})) |cwd_path| {
         if (std.posix.readlink(cwd_path, cwd_buf)) |link| {
             if (link.len > 0) leader_cwd = link;
         } else |_| {}
     } else |_| {}
+
+    // Snapshot every pid + its stat row once, so the BFS can look up ppid
+    // relationships without re-reading /proc.
+    var entries = std.ArrayListUnmanaged(ProcEntry){};
+    defer entries.deinit(allocator);
 
     var dir = std.fs.openDirAbsolute("/proc", .{ .iterate = true }) catch return null;
     defer dir.close();
@@ -244,35 +251,79 @@ pub fn getStats(fd: posix.fd_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?li
         if (n == 0) continue;
 
         const ps = parseProcStat(stat_buf[0..n]) orelse continue;
-        if (ps.pgrp != pgrp) continue;
+        entries.append(allocator, .{ .pid = pid, .stat = ps }) catch break;
+    }
+
+    if (entries.items.len == 0) return null;
+
+    // Find the leader in the snapshot. If it's gone, bail.
+    var leader_idx: ?usize = null;
+    for (entries.items, 0..) |e, i| {
+        if (e.pid == leader_pid) {
+            leader_idx = i;
+            break;
+        }
+    }
+    const li = leader_idx orelse return null;
+
+    // BFS by ppid. `marked[i] == true` ⇒ entry i is the leader or a
+    // transitive descendant.
+    const marked = allocator.alloc(bool, entries.items.len) catch return null;
+    defer allocator.free(marked);
+    @memset(marked, false);
+
+    var queue = std.ArrayListUnmanaged(usize){};
+    defer queue.deinit(allocator);
+
+    marked[li] = true;
+    queue.append(allocator, li) catch return null;
+
+    var head: usize = 0;
+    while (head < queue.items.len) : (head += 1) {
+        const parent_pid = entries.items[queue.items[head]].pid;
+        for (entries.items, 0..) |e, i| {
+            if (marked[i]) continue;
+            if (e.stat.ppid != parent_pid) continue;
+            marked[i] = true;
+            queue.append(allocator, i) catch break;
+        }
+    }
+
+    var children = std.ArrayListUnmanaged(lib.ChildStats){};
+    errdefer children.deinit(allocator);
+
+    var total_rss: u64 = 0;
+    var total_user: u64 = 0;
+    var total_sys: u64 = 0;
+    var count: u32 = 0;
+
+    for (entries.items, 0..) |e, i| {
+        if (!marked[i]) continue;
+        const ps = e.stat;
 
         const rss_bytes = ps.rss_pages * page_size;
         const cpu_user_us = (ps.utime_ticks * 1_000_000) / clk_tck;
         const cpu_sys_us = (ps.stime_ticks * 1_000_000) / clk_tck;
 
-        if (pid == pgrp) {
-            total_rss += rss_bytes;
-            total_user += cpu_user_us;
-            total_sys += cpu_sys_us;
-            count += 1;
-        } else {
-            var child = lib.ChildStats{
-                .pid = pid,
-                .name = undefined,
-                .name_len = 0,
-                .rss_bytes = rss_bytes,
-                .cpu_user_us = cpu_user_us,
-                .cpu_sys_us = cpu_sys_us,
-            };
-            const nl = @min(ps.comm.len, child.name.len);
-            if (nl > 0) @memcpy(child.name[0..nl], ps.comm[0..nl]);
-            child.name_len = @intCast(nl);
-            children.append(allocator, child) catch continue;
-            total_rss += rss_bytes;
-            total_user += cpu_user_us;
-            total_sys += cpu_sys_us;
-            count += 1;
-        }
+        total_rss += rss_bytes;
+        total_user += cpu_user_us;
+        total_sys += cpu_sys_us;
+        count += 1;
+
+        if (e.pid == leader_pid) continue;
+
+        var child = lib.ChildStats{
+            .pid = e.pid,
+            .name = undefined,
+            .name_len = 0,
+            .rss_bytes = rss_bytes,
+            .cpu_user_us = cpu_user_us,
+            .cpu_sys_us = cpu_sys_us,
+        };
+        const nl = @min(@as(usize, ps.comm_len), child.name.len);
+        if (nl > 0) @memcpy(child.name[0..nl], ps.comm[0..nl]);
+        child.name_len = @intCast(nl);
+        children.append(allocator, child) catch continue;
     }
 
     if (count == 0) {
@@ -285,7 +336,7 @@ pub fn getStats(fd: posix.fd_t, allocator: std.mem.Allocator, cwd_buf: []u8) ?li
         break :blk &[_]lib.ChildStats{};
     };
     return lib.Stats{
-        .pid = pgrp,
+        .pid = leader_pid,
         .cwd = leader_cwd,
         .rss_bytes = total_rss,
         .cpu_user_us = total_user,
@@ -302,7 +353,20 @@ fn parseProcStat(buf: []const u8) ?ProcStat {
     const last_paren = std.mem.lastIndexOfScalar(u8, buf, ')') orelse return null;
     if (last_paren <= first_paren or last_paren + 2 >= buf.len) return null;
 
-    const comm = buf[first_paren + 1 .. last_paren];
+    const comm_src = buf[first_paren + 1 .. last_paren];
+
+    var result = ProcStat{
+        .ppid = -1,
+        .comm = undefined,
+        .comm_len = 0,
+        .utime_ticks = 0,
+        .stime_ticks = 0,
+        .rss_pages = 0,
+    };
+    // Copy comm out of the source buffer so the caller can reuse it.
+    const copy_len = @min(comm_src.len, result.comm.len);
+    if (copy_len > 0) @memcpy(result.comm[0..copy_len], comm_src[0..copy_len]);
+    result.comm_len = @intCast(copy_len);
 
     // Fields after last ')': state(0) ppid(1) pgrp(2) session(3) tty_nr(4)
     //   tpgid(5) flags(6) minflt(7) cminflt(8) majflt(9) cmajflt(10)
@@ -310,16 +374,9 @@ fn parseProcStat(buf: []const u8) ?ProcStat {
     //   num_threads(17) itrealvalue(18) starttime(19) vsize(20) rss(21)
     var it = std.mem.tokenizeScalar(u8, buf[last_paren + 2 ..], ' ');
     var idx: usize = 0;
-    var result = ProcStat{
-        .pgrp = -1,
-        .comm = comm,
-        .utime_ticks = 0,
-        .stime_ticks = 0,
-        .rss_pages = 0,
-    };
     while (it.next()) |field| : (idx += 1) {
         switch (idx) {
-            2 => result.pgrp = std.fmt.parseInt(posix.pid_t, field, 10) catch return null,
+            1 => result.ppid = std.fmt.parseInt(posix.pid_t, field, 10) catch return null,
             11 => result.utime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
             12 => result.stime_ticks = std.fmt.parseInt(u64, field, 10) catch 0,
             21 => {

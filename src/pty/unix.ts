@@ -97,7 +97,7 @@ export class UnixPty extends BasePty {
   stats(): IPtyStats | null {
     if (this._closed) return null;
     try {
-      return native.stats(this._fd) ?? null;
+      return native.stats(this.pid) ?? null;
     } catch {
       return null;
     }

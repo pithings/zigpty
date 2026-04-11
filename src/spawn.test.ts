@@ -200,6 +200,33 @@ describe("stats", () => {
     pty.kill();
     await pty.exited;
   });
+
+  it.skipIf(isWindows)("should track descendants in a different process group", async () => {
+    // Regression test for the pivot from foreground-pgrp aggregation to a
+    // ppid descendant tree. `child_process.spawn(..., { detached: true })`
+    // calls setsid() in the child, placing it in its own session/pgrp. The
+    // old pgrp-based code would have missed this child entirely; the new
+    // ppid-based BFS still finds it because ppid still points at the leader.
+    const script =
+      "const cp = require('node:child_process');" +
+      "cp.spawn('/bin/sleep', ['5'], { detached: true, stdio: 'ignore' }).unref();" +
+      "setTimeout(() => {}, 4000);";
+    const pty = spawn(process.execPath, ["-e", script]);
+
+    // macOS reports `/bin/sleep` as `gsleep` (Apple's g-prefixed comm); match
+    // both with `includes("sleep")`.
+    const stats = await pollStats(
+      pty,
+      (s) => s.children.some((c) => c.name.includes("sleep")),
+      8000,
+    );
+    const detached = stats.children.find((c) => c.name.includes("sleep"));
+    expect(detached).toBeDefined();
+    expect(detached!.pid).toBeGreaterThan(0);
+
+    pty.kill();
+    await pty.exited;
+  });
 });
 
 describeUnix("process name (unix)", () => {
