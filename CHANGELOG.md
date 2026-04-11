@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.1.6
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.1.5...v0.1.6)
+
+### 🚀 Enhancements
+
+- Stats ([#3](https://github.com/pithings/zigpty/pull/3))
+- **stats:** Aggregate by ppid descendant tree instead of foreground pgrp ([775ddc0](https://github.com/pithings/zigpty/commit/775ddc0))
+
+### 🏡 Chore
+
+- Add playground ([bc1f964](https://github.com/pithings/zigpty/commit/bc1f964))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+
 ## v0.1.5
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.1.4...v0.1.5)
