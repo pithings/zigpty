@@ -66,14 +66,14 @@ fn execveLinkerFallback(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8,
 /// Read the PT_INTERP (dynamic linker path) from an ELF binary.
 fn readElfInterp(file: [*:0]const u8, buf: *[256]u8) ?[*:0]const u8 {
     const fd_rc = linux.open(file, .{ .ACCMODE = .RDONLY }, 0);
-    if (linux.E.init(fd_rc) != .SUCCESS) return null;
+    if (linux.errno(fd_rc) != .SUCCESS) return null;
     defer _ = linux.close(@intCast(fd_rc));
     const fd: i32 = @intCast(fd_rc);
 
     // Read ELF header
     var ehdr: [64]u8 = undefined;
     const n = linux.read(fd, &ehdr, 64);
-    if (linux.E.init(n) != .SUCCESS or n < 64) return null;
+    if (linux.errno(n) != .SUCCESS or n < 64) return null;
 
     // Verify ELF magic
     if (ehdr[0] != 0x7f or ehdr[1] != 'E' or ehdr[2] != 'L' or ehdr[3] != 'F') return null;
@@ -91,9 +91,9 @@ fn readElfInterp(file: [*:0]const u8, buf: *[256]u8) ?[*:0]const u8 {
     var idx: u16 = 0;
     while (idx < e_phnum) : (idx += 1) {
         const off = e_phoff + @as(u64, idx) * e_phentsize;
-        if (linux.E.init(linux.lseek(fd, @bitCast(off), linux.SEEK.SET)) != .SUCCESS) continue;
+        if (linux.errno(linux.lseek(fd, @bitCast(off), linux.SEEK.SET)) != .SUCCESS) continue;
         const pn = linux.read(fd, &ph_buf, @min(e_phentsize, 56));
-        if (linux.E.init(pn) != .SUCCESS or pn < 56) continue;
+        if (linux.errno(pn) != .SUCCESS or pn < 56) continue;
 
         const p_type = std.mem.readInt(u32, ph_buf[0..4], .little);
         if (p_type != 3) continue; // PT_INTERP = 3
@@ -102,9 +102,9 @@ fn readElfInterp(file: [*:0]const u8, buf: *[256]u8) ?[*:0]const u8 {
         const p_filesz: u64 = std.mem.readInt(u64, ph_buf[32..40], .little);
         if (p_filesz == 0 or p_filesz > buf.len) return null;
 
-        if (linux.E.init(linux.lseek(fd, @bitCast(p_offset), linux.SEEK.SET)) != .SUCCESS) return null;
+        if (linux.errno(linux.lseek(fd, @bitCast(p_offset), linux.SEEK.SET)) != .SUCCESS) return null;
         const rn = linux.read(fd, buf, @intCast(p_filesz));
-        if (linux.E.init(rn) != .SUCCESS or rn < p_filesz) return null;
+        if (linux.errno(rn) != .SUCCESS or rn < p_filesz) return null;
 
         // Ensure null-terminated
         const len: usize = @intCast(p_filesz);
@@ -122,7 +122,7 @@ fn readElfInterp(file: [*:0]const u8, buf: *[256]u8) ?[*:0]const u8 {
 
 /// Check if a file has executable permission (but may be on a noexec mount).
 fn isExecutable(path: [*:0]const u8) bool {
-    return linux.E.init(linux.faccessat(linux.AT.FDCWD, path, linux.X_OK, 0)) == .SUCCESS;
+    return linux.errno(linux.faccessat(linux.AT.FDCWD, path, linux.X_OK, 0)) == .SUCCESS;
 }
 
 /// Resolve a command name to a full path by searching PATH from envp.
@@ -140,7 +140,7 @@ fn resolveInPath(file: []const u8, envp: [*:null]const ?[*:0]const u8) ?[*:0]con
         resolve_buf[dir.len + 1 + file.len] = 0;
         const full: [*:0]const u8 = @ptrCast(resolve_buf[0 .. dir.len + 1 + file.len :0]);
         // Check if the file exists and is executable
-        if (linux.E.init(linux.faccessat(linux.AT.FDCWD, full, linux.X_OK, 0)) == .SUCCESS) {
+        if (linux.errno(linux.faccessat(linux.AT.FDCWD, full, linux.X_OK, 0)) == .SUCCESS) {
             return full;
         }
     }
@@ -174,15 +174,17 @@ pub fn getProcessName(fd: posix.fd_t, buf: []u8) ?[]const u8 {
     const pgrp = tcgetpgrp(@intCast(fd));
     if (pgrp < 0) return null;
 
-    var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{pgrp}) catch return null;
+    var path_buf: [65]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/cmdline", .{pgrp}) catch return null;
 
-    const file_handle = std.fs.openFileAbsolute(path, .{}) catch return null;
-    defer file_handle.close();
+    const raw_fd = linux.open(path, .{ .ACCMODE = .RDONLY }, 0);
+    if (linux.errno(raw_fd) != .SUCCESS) return null;
+    defer _ = linux.close(@intCast(raw_fd));
 
-    const bytes_read = file_handle.read(buf) catch return null;
-    if (bytes_read == 0) return null;
+    const n = linux.read(@intCast(raw_fd), buf.ptr, buf.len);
+    if (linux.errno(n) != .SUCCESS or n == 0) return null;
 
+    const bytes_read: usize = n;
     const cmd = std.mem.sliceTo(buf[0..bytes_read], 0);
     return if (std.mem.lastIndexOfScalar(u8, cmd, '/')) |p| cmd[p + 1 ..] else cmd;
 }
@@ -220,38 +222,52 @@ pub fn getStats(leader_pid: posix.pid_t, allocator: std.mem.Allocator, cwd_buf: 
     // if this fails the process is probably gone, but we still try the walk
     // since the child could have reparented.
     var leader_cwd: ?[]const u8 = null;
-    var path_buf: [64]u8 = undefined;
-    if (std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{leader_pid})) |cwd_path| {
-        if (std.posix.readlink(cwd_path, cwd_buf)) |link| {
-            if (link.len > 0) leader_cwd = link;
-        } else |_| {}
+    var path_buf: [65]u8 = undefined;
+    if (std.fmt.bufPrintZ(&path_buf, "/proc/{d}/cwd", .{leader_pid})) |cwd_path| {
+        const rc = linux.readlink(cwd_path, cwd_buf.ptr, cwd_buf.len);
+        if (linux.errno(rc) == .SUCCESS) {
+            const len: usize = rc;
+            if (len > 0) leader_cwd = cwd_buf[0..len];
+        }
     } else |_| {}
 
     // Snapshot every pid + its stat row once, so the BFS can look up ppid
     // relationships without re-reading /proc.
-    var entries = std.ArrayListUnmanaged(ProcEntry){};
+    var entries = std.ArrayListUnmanaged(ProcEntry).empty;
     defer entries.deinit(allocator);
 
-    var dir = std.fs.openDirAbsolute("/proc", .{ .iterate = true }) catch return null;
-    defer dir.close();
+    // Open /proc directory using raw syscall (std.fs.openDirAbsolute removed in 0.16.0).
+    const proc_dir_fd = linux.open("/proc", .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+    if (linux.errno(proc_dir_fd) != .SUCCESS) return null;
+    defer _ = linux.close(@intCast(proc_dir_fd));
 
-    var it = dir.iterate();
-    while (true) {
-        const entry = (it.next() catch break) orelse break;
-        // Don't filter by entry.kind — procfs can return .unknown depending on
-        // the kernel/mount. parseInt on the name is enough to skip non-pid dirs.
-        const pid = std.fmt.parseInt(posix.pid_t, entry.name, 10) catch continue;
+    var getdents_buf: [4096]u8 = undefined;
+    outer: while (true) {
+        const nread = linux.getdents64(@intCast(proc_dir_fd), @ptrCast(&getdents_buf), getdents_buf.len);
+        if (linux.errno(nread) != .SUCCESS or nread == 0) break;
 
-        const stat_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch continue;
-        const f = std.fs.openFileAbsolute(stat_path, .{}) catch continue;
-        defer f.close();
+        var offset: usize = 0;
+        while (offset < nread) {
+            const d: *align(1) const linux.dirent64 = @ptrCast(getdents_buf[offset..]);
+            offset += d.reclen;
 
-        var stat_buf: [1024]u8 = undefined;
-        const n = f.read(&stat_buf) catch continue;
-        if (n == 0) continue;
+            // parseInt on the name skips non-pid entries (e.g. "self", "net", etc.)
+            const name_ptr: [*:0]const u8 = @ptrCast(&d.name);
+            const name = std.mem.sliceTo(name_ptr, 0);
+            const pid = std.fmt.parseInt(posix.pid_t, name, 10) catch continue;
 
-        const ps = parseProcStat(stat_buf[0..n]) orelse continue;
-        entries.append(allocator, .{ .pid = pid, .stat = ps }) catch break;
+            const stat_path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/stat", .{pid}) catch continue;
+            const stat_fd = linux.open(stat_path, .{ .ACCMODE = .RDONLY }, 0);
+            if (linux.errno(stat_fd) != .SUCCESS) continue;
+
+            var stat_buf: [1024]u8 = undefined;
+            const n = linux.read(@intCast(stat_fd), &stat_buf, stat_buf.len);
+            _ = linux.close(@intCast(stat_fd));
+            if (linux.errno(n) != .SUCCESS or n == 0) continue;
+
+            const ps = parseProcStat(stat_buf[0..@intCast(n)]) orelse continue;
+            entries.append(allocator, .{ .pid = pid, .stat = ps }) catch break :outer;
+        }
     }
 
     if (entries.items.len == 0) return null;
@@ -272,7 +288,7 @@ pub fn getStats(leader_pid: posix.pid_t, allocator: std.mem.Allocator, cwd_buf: 
     defer allocator.free(marked);
     @memset(marked, false);
 
-    var queue = std.ArrayListUnmanaged(usize){};
+    var queue = std.ArrayListUnmanaged(usize).empty;
     defer queue.deinit(allocator);
 
     marked[li] = true;
@@ -289,7 +305,7 @@ pub fn getStats(leader_pid: posix.pid_t, allocator: std.mem.Allocator, cwd_buf: 
         }
     }
 
-    var children = std.ArrayListUnmanaged(lib.ChildStats){};
+    var children = std.ArrayListUnmanaged(lib.ChildStats).empty;
     errdefer children.deinit(allocator);
 
     var total_rss: u64 = 0;
@@ -406,11 +422,14 @@ fn parseAuxvPageSize() ?u64 {
     const AT_NULL: usize = 0;
     const AT_PAGESZ: usize = 6;
 
-    const f = std.fs.openFileAbsolute("/proc/self/auxv", .{}) catch return null;
-    defer f.close();
+    const raw_fd = linux.open("/proc/self/auxv", .{ .ACCMODE = .RDONLY }, 0);
+    if (linux.errno(raw_fd) != .SUCCESS) return null;
+    defer _ = linux.close(@intCast(raw_fd));
 
     var buf: [1024]u8 = undefined;
-    const n = f.read(&buf) catch return null;
+    const n_raw = linux.read(@intCast(raw_fd), &buf, buf.len);
+    if (linux.errno(n_raw) != .SUCCESS) return null;
+    const n: usize = @intCast(n_raw);
 
     // auxv entries are stored in the target's native endianness, not a fixed one.
     const endian = builtin.cpu.arch.endian();
@@ -453,14 +472,14 @@ pub fn resetSignalHandlers() void {
     sa.handler = .{ .handler = linux.SIG.DFL };
     var i: u8 = 1;
     while (i < linux.NSIG) : (i += 1) {
-        if (i == linux.SIG.KILL or i == linux.SIG.STOP) continue;
+        if (i == @intFromEnum(linux.SIG.KILL) or i == @intFromEnum(linux.SIG.STOP)) continue;
         // Keep SIGSYS handler for Android seccomp softfail.
         // ensureTermuxExec() loads libtermux-exec.so before fork, which
         // installs a SIGSYS handler that converts SECCOMP_RET_TRAP to
         // ENOSYS. We must preserve it so closeExcessFds() can safely
         // attempt close_range on older kernels.
-        if (i == linux.SIG.SYS) continue;
-        _ = linux.sigaction(i, &sa, null);
+        if (i == @intFromEnum(linux.SIG.SYS)) continue;
+        _ = linux.sigaction(@enumFromInt(i), &sa, null);
     }
 }
 
@@ -470,11 +489,11 @@ pub fn closeExcessFds() void {
     // child inherits libtermux-exec.so's SIGSYS handler — without it,
     // seccomp kills the process instead of returning ENOSYS.
     const rc = linux.syscall3(.close_range, 3, std.math.maxInt(c_uint), 0);
-    if (linux.E.init(rc) == .SUCCESS) return;
+    if (linux.errno(rc) == .SUCCESS) return;
 
     // Fallback: raw getdents64 on /proc/self/fd (no allocator, async-signal-safe)
     const dir_fd = linux.open("/proc/self/fd", .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
-    if (linux.E.init(dir_fd) != .SUCCESS) {
+    if (linux.errno(dir_fd) != .SUCCESS) {
         // Last resort: brute-force close FDs 3..256
         var fd: c_int = 3;
         while (fd < 256) : (fd += 1) _ = linux.close(@intCast(fd));
@@ -485,7 +504,7 @@ pub fn closeExcessFds() void {
     var buf: [1024]u8 = undefined;
     while (true) {
         const nread = linux.getdents64(@intCast(dir_fd), @ptrCast(&buf), buf.len);
-        if (linux.E.init(nread) != .SUCCESS or nread == 0) break;
+        if (linux.errno(nread) != .SUCCESS or nread == 0) break;
 
         var offset: usize = 0;
         while (offset < nread) {

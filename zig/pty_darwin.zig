@@ -210,7 +210,7 @@ fn snapshotProcesses(allocator: std.mem.Allocator) ?[]ProcEntry {
     const num_pids: usize = @intCast(@divTrunc(got_bytes, @sizeOf(c_int)));
     if (num_pids == 0) return null;
 
-    var entries = std.ArrayListUnmanaged(ProcEntry){};
+    var entries = std.ArrayListUnmanaged(ProcEntry).empty;
     errdefer entries.deinit(allocator);
     entries.ensureTotalCapacity(allocator, num_pids) catch {};
 
@@ -241,7 +241,7 @@ pub fn getStats(leader_pid: posix.pid_t, allocator: std.mem.Allocator, cwd_buf: 
     // descendants) cheap (just two proc_pidinfo calls).
     const leader_ti = taskInfo(@intCast(leader_pid)) orelse return null;
 
-    var children = std.ArrayListUnmanaged(lib.ChildStats){};
+    var children = std.ArrayListUnmanaged(lib.ChildStats).empty;
     errdefer children.deinit(allocator);
 
     var total_rss: u64 = leader_ti.rss;
@@ -269,7 +269,7 @@ pub fn getStats(leader_pid: posix.pid_t, allocator: std.mem.Allocator, cwd_buf: 
         }
         const li = leader_idx orelse break :descendants;
 
-        var queue = std.ArrayListUnmanaged(usize){};
+        var queue = std.ArrayListUnmanaged(usize).empty;
         defer queue.deinit(allocator);
 
         marked[li] = true;
@@ -354,8 +354,8 @@ pub fn resetSignalHandlers() void {
     sa.handler = .{ .handler = std.c.SIG.DFL };
     var i: u8 = 1;
     while (i < std.c.NSIG) : (i += 1) {
-        if (i == posix.SIG.KILL or i == posix.SIG.STOP) continue;
-        _ = std.c.sigaction(i, &sa, null);
+        if (i == @intFromEnum(posix.SIG.KILL) or i == @intFromEnum(posix.SIG.STOP)) continue;
+        _ = std.c.sigaction(@enumFromInt(i), &sa, null);
     }
 }
 

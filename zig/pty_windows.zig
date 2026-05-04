@@ -8,6 +8,7 @@ pub const INVALID_HANDLE: HANDLE = windows.INVALID_HANDLE_VALUE;
 pub const DWORD = windows.DWORD;
 pub const BOOL = windows.BOOL;
 pub const WORD = windows.WORD;
+const HRESULT = i32;
 
 // --- Types ---
 
@@ -121,12 +122,12 @@ extern "kernel32" fn CreatePseudoConsole(
     hOutput: HANDLE,
     dwFlags: DWORD,
     phPC: *HPCON,
-) callconv(.c) windows.HRESULT;
+) callconv(.c) HRESULT;
 
 extern "kernel32" fn ResizePseudoConsole(
     hPC: HPCON,
     size: COORD,
-) callconv(.c) windows.HRESULT;
+) callconv(.c) HRESULT;
 
 extern "kernel32" fn ClosePseudoConsole(hPC: HPCON) callconv(.c) void;
 
@@ -288,14 +289,14 @@ fn processStats(process: HANDLE) ?struct { rss: u64, user_us: u64, sys_us: u64 }
 
     var pmc = std.mem.zeroes(PROCESS_MEMORY_COUNTERS);
     pmc.cb = @sizeOf(PROCESS_MEMORY_COUNTERS);
-    if (K32GetProcessMemoryInfo(process, &pmc, @sizeOf(PROCESS_MEMORY_COUNTERS)) == 0) return null;
+    if (!K32GetProcessMemoryInfo(process, &pmc, @sizeOf(PROCESS_MEMORY_COUNTERS)).toBool()) return null;
     rss = pmc.WorkingSetSize;
 
     var creation: FILETIME = undefined;
     var exit: FILETIME = undefined;
     var kernel: FILETIME = undefined;
     var user: FILETIME = undefined;
-    if (GetProcessTimes(process, &creation, &exit, &kernel, &user) == 0) return null;
+    if (!GetProcessTimes(process, &creation, &exit, &kernel, &user).toBool()) return null;
     user_us = filetimeToMicros(user);
     sys_us = filetimeToMicros(kernel);
 
@@ -329,9 +330,9 @@ fn snapshotProcesses(allocator: std.mem.Allocator) ![]ProcEntry {
     var pe = std.mem.zeroes(PROCESSENTRY32W);
     pe.dwSize = @sizeOf(PROCESSENTRY32W);
 
-    if (Process32FirstW(snap, &pe) == 0) return error.SnapshotFailed;
+    if (!Process32FirstW(snap, &pe).toBool()) return error.SnapshotFailed;
 
-    var list = std.ArrayListUnmanaged(ProcEntry){};
+    var list = std.ArrayListUnmanaged(ProcEntry).empty;
     errdefer list.deinit(allocator);
 
     while (true) {
@@ -356,7 +357,7 @@ fn snapshotProcesses(allocator: std.mem.Allocator) ![]ProcEntry {
 
         try list.append(allocator, entry);
 
-        if (Process32NextW(snap, &pe) == 0) break;
+        if (!Process32NextW(snap, &pe).toBool()) break;
     }
 
     return try list.toOwnedSlice(allocator);
@@ -372,13 +373,13 @@ pub fn getStats(process: HANDLE, pid: u32, allocator: std.mem.Allocator) ?lib.St
     // Gate on liveness.
     const STILL_ACTIVE: DWORD = 259;
     var exit_code: DWORD = 0;
-    if (GetExitCodeProcess(process, &exit_code) == 0) return null;
+    if (!GetExitCodeProcess(process, &exit_code).toBool()) return null;
     if (exit_code != STILL_ACTIVE) return null;
 
     // Start with leader stats from the already-open process handle.
     const leader_stats = processStats(process) orelse return null;
 
-    var children = std.ArrayListUnmanaged(lib.ChildStats){};
+    var children = std.ArrayListUnmanaged(lib.ChildStats).empty;
     errdefer children.deinit(allocator);
 
     var total_rss: u64 = leader_stats.rss;
@@ -406,7 +407,7 @@ pub fn getStats(process: HANDLE, pid: u32, allocator: std.mem.Allocator) ?lib.St
         }
         const li = leader_idx orelse break :descendants;
 
-        var queue = std.ArrayListUnmanaged(usize){};
+        var queue = std.ArrayListUnmanaged(usize).empty;
         defer queue.deinit(allocator);
 
         marked[li] = true;
@@ -431,7 +432,7 @@ pub fn getStats(process: HANDLE, pid: u32, allocator: std.mem.Allocator) ?lib.St
             if (!marked[i]) continue;
             if (e.pid == pid) continue;
 
-            const h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, e.pid) orelse continue;
+            const h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, .FALSE, e.pid) orelse continue;
             defer closeHandle(h);
 
             const ps = processStats(h) orelse continue;
@@ -480,14 +481,14 @@ pub fn createConPty(cols: u16, rows: u16) ConPtyError!ConPtySetup {
     // Create input pipe (parent writes → ConPTY reads)
     var pipe_in_read: HANDLE = INVALID_HANDLE;
     var pipe_in_write: HANDLE = INVALID_HANDLE;
-    if (CreatePipe(&pipe_in_read, &pipe_in_write, null, 0) == 0) {
+    if (!CreatePipe(&pipe_in_read, &pipe_in_write, null, 0).toBool()) {
         return ConPtyError.CreatePipeFailed;
     }
 
     // Create output pipe (ConPTY writes → parent reads)
     var pipe_out_read: HANDLE = INVALID_HANDLE;
     var pipe_out_write: HANDLE = INVALID_HANDLE;
-    if (CreatePipe(&pipe_out_read, &pipe_out_write, null, 0) == 0) {
+    if (!CreatePipe(&pipe_out_read, &pipe_out_write, null, 0).toBool()) {
         closeHandle(pipe_in_read);
         closeHandle(pipe_in_write);
         return ConPtyError.CreatePipeFailed;
@@ -534,12 +535,12 @@ pub fn startProcess(
     const attr_list: LPPROC_THREAD_ATTRIBUTE_LIST = @ptrCast(attr_buf.ptr);
     defer std.heap.page_allocator.free(attr_buf);
 
-    if (InitializeProcThreadAttributeList(attr_list, 1, 0, &attr_size) == 0) {
+    if (!InitializeProcThreadAttributeList(attr_list, 1, 0, &attr_size).toBool()) {
         return ConPtyError.AttrListInitFailed;
     }
     defer DeleteProcThreadAttributeList(attr_list);
 
-    if (UpdateProcThreadAttribute(
+    if (!UpdateProcThreadAttribute(
         attr_list,
         0,
         PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
@@ -547,7 +548,7 @@ pub fn startProcess(
         @sizeOf(HPCON),
         null,
         null,
-    ) == 0) {
+    ).toBool()) {
         return ConPtyError.AttrListUpdateFailed;
     }
 
@@ -563,18 +564,18 @@ pub fn startProcess(
 
     // Cast away const for CreateProcessW (it may modify the command line in-place)
     const cmd_buf: [*:0]u16 = @constCast(cmd_line);
-    if (CreateProcessW(
+    if (!CreateProcessW(
         null,
         cmd_buf,
         null,
         null,
-        0, // don't inherit handles
+        .FALSE, // don't inherit handles
         EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
         env_block,
         cwd,
         @ptrCast(&si),
         &pi,
-    ) == 0) {
+    ).toBool()) {
         return ConPtyError.CreateProcessFailed;
     }
 
@@ -612,7 +613,7 @@ pub fn spawnConPty(
 /// Returns bytes read, or 0 on EOF/error.
 pub fn readOutput(conout: HANDLE, buf: []u8) usize {
     var bytes_read: DWORD = 0;
-    if (ReadFile(conout, buf.ptr, @intCast(buf.len), &bytes_read, null) == 0) {
+    if (!ReadFile(conout, buf.ptr, @intCast(buf.len), &bytes_read, null).toBool()) {
         return 0; // EOF or error (pipe broken)
     }
     return bytes_read;
@@ -623,13 +624,13 @@ pub fn writeInput(conin: HANDLE, data: []const u8) ConPtyError!void {
     var offset: usize = 0;
     while (offset < data.len) {
         var written: DWORD = 0;
-        if (WriteFile(
+        if (!WriteFile(
             conin,
             data[offset..].ptr,
             @intCast(data.len - offset),
             &written,
             null,
-        ) == 0) {
+        ).toBool()) {
             return ConPtyError.WriteFailed;
         }
         offset += written;
@@ -647,7 +648,7 @@ pub fn resizeConsole(hpc: HPCON, cols: u16, rows: u16) ConPtyError!void {
 pub fn waitForExit(process: HANDLE) ExitInfo {
     _ = WaitForSingleObject(process, INFINITE);
     var exit_code: DWORD = 0;
-    if (GetExitCodeProcess(process, &exit_code) == 0) {
+    if (!GetExitCodeProcess(process, &exit_code).toBool()) {
         return .{ .exit_code = -1, .signal_code = 0 };
     }
     return .{ .exit_code = @bitCast(exit_code), .signal_code = 0 };
@@ -700,7 +701,7 @@ pub fn utf8ToUtf16Alloc(alloc: std.mem.Allocator, utf8: []const u8) ![:0]u16 {
 /// Build a Windows environment block (null-delimited, double-null-terminated UTF-16)
 /// from an array of "KEY=VALUE" UTF-8 strings.
 pub fn buildEnvBlock(a: std.mem.Allocator, env_pairs: []const []const u8) ![]u16 {
-    var buf = std.ArrayListUnmanaged(u16){};
+    var buf = std.ArrayListUnmanaged(u16).empty;
     for (env_pairs) |pair| {
         const wide = try std.unicode.utf8ToUtf16LeAllocZ(a, pair);
         defer a.free(wide);
@@ -714,7 +715,7 @@ pub fn buildEnvBlock(a: std.mem.Allocator, env_pairs: []const []const u8) ![]u16
 /// Build a Windows command line string from file and args.
 /// Handles quoting per Windows rules.
 pub fn buildCmdLine(a: std.mem.Allocator, file: []const u8, args: []const []const u8) ![:0]u16 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(a);
 
     // Quote the executable

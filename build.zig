@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const cross_targets: []const std.Target.Query = &.{
     .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu },
@@ -41,15 +42,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
 
     // --- NAPI shared library builds ---
-    const clean = &b.addRemoveDirTree(.{ .cwd_relative = "prebuilds" }).step;
+    const clean = b.addSystemCommand(switch (builtin.os.tag) {
+        .windows => &.{ "cmd", "/c", "if exist prebuilds rmdir /s /q prebuilds" },
+        else => &.{ "rm", "-rf", "prebuilds" },
+    });
 
     if (target_query.isNative()) {
-        addTarget(b, clean, b.resolveTargetQuery(target_query), optimize);
+        addTarget(b, &clean.step, b.resolveTargetQuery(target_query), optimize);
         for (cross_targets) |ct| {
-            addTarget(b, clean, b.resolveTargetQuery(ct), optimize);
+            addTarget(b, &clean.step, b.resolveTargetQuery(ct), optimize);
         }
     } else {
-        addTarget(b, clean, b.resolveTargetQuery(target_query), optimize);
+        addTarget(b, &clean.step, b.resolveTargetQuery(target_query), optimize);
     }
 }
 
