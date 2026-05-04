@@ -296,7 +296,7 @@ const exit_info = pty.waitForExit(result.pid);
 
 ## Building from source
 
-Requires [Zig](https://ziglang.org/) 0.15.1+.
+Requires [Zig](https://ziglang.org/) 0.16.0+.
 
 ```sh
 zig build              # Build prebuilds (all targets)
