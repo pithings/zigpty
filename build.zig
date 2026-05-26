@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
 
     // --- NAPI shared library builds ---
-    const clean = &b.addRemoveDirTree(.{ .cwd_relative = "prebuilds" }).step;
+    const clean = createCleanStep(b, "prebuilds");
 
     if (target_query.isNative()) {
         addTarget(b, clean, b.resolveTargetQuery(target_query), optimize);
@@ -51,6 +51,27 @@ pub fn build(b: *std.Build) void {
     } else {
         addTarget(b, clean, b.resolveTargetQuery(target_query), optimize);
     }
+}
+
+fn createCleanStep(b: *std.Build, sub_path: []const u8) *std.Build.Step {
+    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
+    // Stash sub_path in the step name; makeCleanStep recovers it by
+    // stripping the "clean " prefix.
+    step.* = std.Build.Step.init(.{
+        .id = .custom,
+        .name = b.fmt("clean {s}", .{sub_path}),
+        .owner = b,
+        .makeFn = makeCleanStep,
+    });
+    return step;
+}
+
+fn makeCleanStep(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+    _ = options;
+    const b = step.owner;
+    const prefix = "clean ";
+    const sub_path = if (std.mem.startsWith(u8, step.name, prefix)) step.name[prefix.len..] else step.name;
+    b.build_root.handle.deleteTree(b.graph.io, sub_path) catch {};
 }
 
 fn addTarget(b: *std.Build, clean: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {

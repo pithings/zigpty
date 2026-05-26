@@ -6,8 +6,12 @@ const windows = std.os.windows;
 pub const HANDLE = windows.HANDLE;
 pub const INVALID_HANDLE: HANDLE = windows.INVALID_HANDLE_VALUE;
 pub const DWORD = windows.DWORD;
-pub const BOOL = windows.BOOL;
+// Use c_int directly (windows.BOOL became a typed enum in Zig 0.16; our extern
+// declarations want plain integer ABI so comparisons against 0 still work).
+pub const BOOL = c_int;
 pub const WORD = windows.WORD;
+// std.os.windows no longer exposes HRESULT in Zig 0.16; it is LONG (i32) at ABI.
+pub const HRESULT = i32;
 
 // --- Types ---
 
@@ -121,12 +125,12 @@ extern "kernel32" fn CreatePseudoConsole(
     hOutput: HANDLE,
     dwFlags: DWORD,
     phPC: *HPCON,
-) callconv(.c) windows.HRESULT;
+) callconv(.c) HRESULT;
 
 extern "kernel32" fn ResizePseudoConsole(
     hPC: HPCON,
     size: COORD,
-) callconv(.c) windows.HRESULT;
+) callconv(.c) HRESULT;
 
 extern "kernel32" fn ClosePseudoConsole(hPC: HPCON) callconv(.c) void;
 
@@ -331,7 +335,7 @@ fn snapshotProcesses(allocator: std.mem.Allocator) ![]ProcEntry {
 
     if (Process32FirstW(snap, &pe) == 0) return error.SnapshotFailed;
 
-    var list = std.ArrayListUnmanaged(ProcEntry){};
+    var list: std.ArrayListUnmanaged(ProcEntry) = .empty;
     errdefer list.deinit(allocator);
 
     while (true) {
@@ -378,7 +382,7 @@ pub fn getStats(process: HANDLE, pid: u32, allocator: std.mem.Allocator) ?lib.St
     // Start with leader stats from the already-open process handle.
     const leader_stats = processStats(process) orelse return null;
 
-    var children = std.ArrayListUnmanaged(lib.ChildStats){};
+    var children: std.ArrayListUnmanaged(lib.ChildStats) = .empty;
     errdefer children.deinit(allocator);
 
     var total_rss: u64 = leader_stats.rss;
@@ -406,7 +410,7 @@ pub fn getStats(process: HANDLE, pid: u32, allocator: std.mem.Allocator) ?lib.St
         }
         const li = leader_idx orelse break :descendants;
 
-        var queue = std.ArrayListUnmanaged(usize){};
+        var queue: std.ArrayListUnmanaged(usize) = .empty;
         defer queue.deinit(allocator);
 
         marked[li] = true;
@@ -700,7 +704,7 @@ pub fn utf8ToUtf16Alloc(alloc: std.mem.Allocator, utf8: []const u8) ![:0]u16 {
 /// Build a Windows environment block (null-delimited, double-null-terminated UTF-16)
 /// from an array of "KEY=VALUE" UTF-8 strings.
 pub fn buildEnvBlock(a: std.mem.Allocator, env_pairs: []const []const u8) ![]u16 {
-    var buf = std.ArrayListUnmanaged(u16){};
+    var buf: std.ArrayListUnmanaged(u16) = .empty;
     for (env_pairs) |pair| {
         const wide = try std.unicode.utf8ToUtf16LeAllocZ(a, pair);
         defer a.free(wide);
@@ -714,7 +718,7 @@ pub fn buildEnvBlock(a: std.mem.Allocator, env_pairs: []const []const u8) ![]u16
 /// Build a Windows command line string from file and args.
 /// Handles quoting per Windows rules.
 pub fn buildCmdLine(a: std.mem.Allocator, file: []const u8, args: []const []const u8) ![:0]u16 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(a);
 
     // Quote the executable

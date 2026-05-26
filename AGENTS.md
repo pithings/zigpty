@@ -16,7 +16,7 @@ Zig-based PTY library. Dual-use: standalone **Zig package** and **Node.js NAPI a
 ```
 zigpty/
 ├── build.zig               # Zig build: exposes "zigpty" module + NAPI shared libs
-├── build.zig.zon           # Zig package metadata (min Zig 0.15.1)
+├── build.zig.zon           # Zig package metadata (min Zig 0.16.0)
 ├── build.config.ts         # obuild config (bundle src/ → dist/)
 ├── zig/                    # Zig sources (two layers)
 │   ├── lib.zig             # Pure Zig PTY library — platform dispatcher + shared code
