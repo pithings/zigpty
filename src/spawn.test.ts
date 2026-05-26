@@ -1,6 +1,11 @@
+import { execFile } from "node:child_process";
 import { platform } from "node:os";
+import * as path from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { open, spawn } from "./index.ts";
+
+const execFileP = promisify(execFile);
 
 const isWindows = platform() === "win32";
 const shell = isWindows ? "cmd.exe" : "/bin/sh";
@@ -26,6 +31,28 @@ describe("spawn", () => {
     });
 
     expect(output).toContain("hello zigpty");
+  });
+
+  // Regression for #4: the exit callback must keep the event loop alive on its
+  // own. If the tsfn is unref'd, Node fires beforeExit and shuts down before
+  // the exit-monitor thread can dispatch the callback. Bypasses the TS layer
+  // and drives the native binding directly so the test doesn't depend on
+  // dist/ or a TS loader being available in the subprocess.
+  it.skipIf(isWindows)("exit callback keeps event loop alive (issue #4)", async () => {
+    const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
+    const script = `
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const dir = ${JSON.stringify(prebuildsDir)};
+      const candidate = fs.readdirSync(dir).find((f) =>
+        f.startsWith("zigpty." + process.platform + "-" + process.arch) && f.endsWith(".node"));
+      const native = require(path.join(dir, candidate));
+      native.fork("true", [], [], process.cwd(), 80, 24, -1, -1, true, (info) => {
+        process.stdout.write("EXITED:" + info.exitCode);
+      });
+    `;
+    const { stdout } = await execFileP(process.execPath, ["-e", script], { timeout: 10_000 });
+    expect(stdout).toBe("EXITED:0");
   });
 
   it("should fire onExit callback", async () => {
