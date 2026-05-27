@@ -8,6 +8,23 @@ export interface IDisposable {
   dispose(): void;
 }
 
+/**
+ * A sink that consumes PTY output. Pass to {@link IPty.attach} to wire it
+ * onto a PTY's data stream.
+ *
+ * Anything with a `feed(data)` method conforms — including `OSCInspector`,
+ * a terminal recorder, a logger, etc. Optional lifecycle hooks let the
+ * consumer react to attach/detach (which also fires when the PTY exits).
+ */
+export interface IPtyConsumer {
+  /** Receive a chunk of PTY output. */
+  feed(data: string | Buffer): void;
+  /** Optional: called once when attached, before the first `feed`. */
+  onAttach?(pty: IPty): void;
+  /** Optional: called once when detached (explicit dispose or PTY exit). */
+  onDetach?(pty: IPty): void;
+}
+
 export interface IPtyChildStats {
   /** Process ID. */
   pid: number;
@@ -79,6 +96,12 @@ export interface IPty {
   waitFor(pattern: string, options?: { timeout?: number }): Promise<string>;
   /** Snapshot OS-level stats (cwd, memory, CPU time) aggregated across the leader process and every transitive descendant. Returns null when unavailable. */
   stats(): IPtyStats | null;
+  /**
+   * Attach a consumer to the PTY's output stream. The consumer's `feed`
+   * receives every data chunk. Returns an `IDisposable` to detach early;
+   * the consumer is also auto-detached when the PTY exits.
+   */
+  attach(consumer: IPtyConsumer): IDisposable;
 }
 
 export interface IPtyOpenOptions {

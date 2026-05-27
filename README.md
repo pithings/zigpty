@@ -108,6 +108,7 @@ interface IPty {
   close(): void;
   waitFor(pattern: string, options?: { timeout?: number }): Promise<string>;
   stats(): IPtyStats | null; // OS-level snapshot (cwd, memory, CPU time)
+  attach(consumer: IPtyConsumer): IDisposable; // Wire a sink to the data stream
 }
 ```
 
@@ -179,6 +180,115 @@ await pty.exited;
 ```
 
 Options: `{ timeout?: number }` — default 30 seconds. Throws if the pattern is not found within the timeout.
+
+### `pty.attach(consumer)`
+
+Wire a generic sink to the PTY's data stream. Anything with a `feed(data)` method conforms to `IPtyConsumer` — including the built-in `OSCInspector`, a file logger, an in-memory recorder, a WebSocket forwarder, etc. The consumer is auto-detached when the PTY exits.
+
+```ts
+interface IPtyConsumer {
+  feed(data: string | Buffer): void;
+  onAttach?(pty: IPty): void; // optional — fires once before the first feed
+  onDetach?(pty: IPty): void; // optional — fires on dispose or PTY exit
+}
+```
+
+```ts
+const recorder = {
+  chunks: [] as Buffer[],
+  feed(data) {
+    this.chunks.push(typeof data === "string" ? Buffer.from(data) : data);
+  },
+};
+
+const sub = pty.attach(recorder);
+// ...
+sub.dispose(); // detach early; otherwise auto-detached on PTY exit
+```
+
+Multiple consumers per PTY are supported and run independently.
+
+### OSC inspector — `zigpty/osc`
+
+Parse OSC (Operating System Command) escape sequences out of any byte stream — title changes, CWD updates, shell-integration marks (OSC 133/633), progress, notifications, and more. The inspector is a pure-TS byte-fed state machine; sequences split across chunks are stitched back together.
+
+```ts
+import { spawn } from "zigpty";
+import { OSCInspector, decodeOSC } from "zigpty/osc";
+
+const inspector = new OSCInspector((event) => {
+  // event = { code: number, payload: string }
+  const decoded = decodeOSC(event);
+  switch (decoded.kind) {
+    case "title":
+      console.log("title:", decoded.title);
+      break;
+    case "cwd":
+      // Unified across OSC 7, ConEmu 9;9, and iTerm2 1337;CurrentDir=
+      console.log(`cwd (${decoded.source}):`, decoded.path);
+      break;
+    case "shellIntegration":
+      // OSC 133/633 — command is A/B/C/D (or vscode-specific tokens)
+      console.log(`${decoded.vendor}/${decoded.command}`, decoded.data);
+      break;
+    case "notification":
+      console.log("notify:", decoded.title, decoded.body);
+      break;
+    case "progress":
+      // ConEmu/Windows Terminal taskbar progress (OSC 9;4)
+      console.log(`progress: state=${decoded.state} value=${decoded.value}`);
+      break;
+    case "mark":
+      // OSC 1337 SetMark / OSC 9;12 ConEmu prompt-start mark
+      console.log("prompt mark from", decoded.vendor);
+      break;
+    case "hyperlink":
+      console.log(decoded.action, decoded.uri); // "open"|"close"
+      break;
+    // ...attention, clipboard, userVar, remoteHost,
+    // shellIntegrationVersion, unknown
+  }
+});
+
+const pty = spawn("/bin/bash");
+pty.attach(inspector); // OSCInspector implements IPtyConsumer
+```
+
+**Decoded shapes** (`DecodedOSC` union) cover the common codes out of the box:
+
+| Code            | `kind`(s)                                                                                         | Notes                                                                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0` / `1` / `2` | `title`                                                                                           | Window / tab / icon title. C0 control bytes stripped.                                                                                                    |
+| `7`             | `cwd` (`source: "osc7"`)                                                                          | `<scheme>://<host>/<path>`. Path is percent-decoded; `host`/`scheme`/`local` exposed.                                                                    |
+| `8`             | `hyperlink`                                                                                       | `action: "open" \| "close"`; `id`, `uri`, and `params`. Empty URI = close.                                                                               |
+| `9`             | `progress` / `cwd` / `mark` / `notification`                                                      | `9;4;…` progress, `9;9;…` ConEmu/WT CWD report, `9;12` prompt mark, `9;<text>` iTerm2 Growl-style notification.                                          |
+| `52`            | `clipboard`                                                                                       | Set, query (`?`), or `clear` (Pd not base64). Multi-char `Pc` exposed via `selections[]`.                                                                |
+| `99`            | `notification` (`vendor: "kitty"`)                                                                | Title / body / phase (`close`, `alive`, `icon`, …); honors `i=` (id), `u=` (urgency), `d=0` (partial chunk), `e=1` (base64 payload).                     |
+| `133`           | `shellIntegration` (`vendor: "vt"`)                                                               | FinalTerm A/B/C/D. `D` parses exit code + `err=`; `A`/`C` parse kitty extras into `params`.                                                              |
+| `633`           | `shellIntegration` (`vendor: "vscode"`)                                                           | A/B/C/D/E/P/EnvSingleStart/EnvSingleEntry/EnvSingleEnd. Applies VSCode `\\`/`\xNN` unescaping.                                                           |
+| `777`           | `notification` (`vendor: "rxvt"`)                                                                 | `notify;<title>;<body>` from the urxvt-perl extension.                                                                                                   |
+| `1337`          | `attention` / `cwd` / `mark` / `userVar` / `remoteHost` / `clipboard` / `shellIntegrationVersion` | iTerm2: `RequestAttention` (`yes`/`no`/`once`/`fireworks`), `CurrentDir=`, `SetMark`, `SetUserVar=`, `RemoteHost=`, `Copy=`, `ShellIntegrationVersion=`. |
+| _other_         | `unknown`                                                                                         | Raw `{code, payload}` preserved.                                                                                                                         |
+
+**Adding custom decoders** — use `createOSCDecoder()` to register handlers for new codes (or override built-ins). The returned function is typed as `DecodedOSC | <your custom kinds>`:
+
+```ts
+import { createOSCDecoder } from "zigpty/osc";
+
+const decode = createOSCDecoder({
+  // OSC 50 — terminal font (xterm), not handled by built-ins
+  50: (payload) => ({ kind: "font" as const, value: payload }),
+  // OSC 1338 — your custom vendor code
+  1338: (payload) => ({ kind: "vendor-x" as const, raw: payload }),
+});
+
+const inspector = new OSCInspector((event) => {
+  const d = decode(event);
+  // d: DecodedOSC | { kind: "font"; ... } | { kind: "vendor-x"; ... }
+});
+```
+
+The built-in registry is exposed as `builtinOSCDecoders: Record<number, OSCDecoderFn<DecodedOSC>>` if you want to inspect or reuse individual decoders.
 
 ### `hasNative`
 

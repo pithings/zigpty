@@ -9,6 +9,7 @@ export type {
   IEvent,
   IOpenResult,
   IPty,
+  IPtyConsumer,
   IPtyOpenOptions,
   IPtyOptions,
 } from "./pty/types.ts";

@@ -41,12 +41,12 @@ describe("spawn", () => {
   it.skipIf(isWindows)("exit callback keeps event loop alive (issue #4)", async () => {
     const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
     const script = `
-      const fs = require("node:fs");
       const path = require("node:path");
       const dir = ${JSON.stringify(prebuildsDir)};
-      const candidate = fs.readdirSync(dir).find((f) =>
-        f.startsWith("zigpty." + process.platform + "-" + process.arch) && f.endsWith(".node"));
-      const native = require(path.join(dir, candidate));
+      const base = "zigpty." + process.platform + "-" + process.arch;
+      let native;
+      try { native = require(path.join(dir, base + ".node")); }
+      catch { native = require(path.join(dir, base + "-musl.node")); }
       native.fork("true", [], [], process.cwd(), 80, 24, -1, -1, true, (info) => {
         process.stdout.write("EXITED:" + info.exitCode);
       });

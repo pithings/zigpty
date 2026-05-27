@@ -1,6 +1,7 @@
 import { platform } from "node:os";
 import { describe, expect, it } from "vitest";
 import { Terminal, spawn } from "./index.ts";
+import { OSCInspector } from "./osc/index.ts";
 
 const isWindows = platform() === "win32";
 const shell = isWindows ? "cmd.exe" : "/bin/sh";
@@ -169,6 +170,25 @@ describe("spawn with terminal option", () => {
     });
 
     expect(exitInfo.exitCode).toBe(7);
+  });
+
+  it("should allow attached consumers to observe terminal-backed PTY data", async () => {
+    const events: Array<{ code: number; payload: string }> = [];
+    const pty = spawn(
+      process.execPath,
+      ["-e", "setTimeout(() => process.stdout.write('\\x1b]0;hi\\x07'), 50)"],
+      {
+        terminal: {
+          data() {},
+        },
+      },
+    );
+
+    pty.attach(new OSCInspector((event) => events.push(event)));
+    await pty.exited;
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(events).toContainEqual({ code: 0, payload: "hi" });
   });
 
   it("should write data via terminal callback", async () => {

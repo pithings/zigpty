@@ -11,7 +11,8 @@
   ],
   "type": "module",
   "exports": {
-    ".": "./dist/index.mjs"
+    ".": "./dist/index.mjs",
+    "./osc": "./dist/osc/index.mjs"
   },
   "scripts": {
     "build": "zig build --release && obuild",
