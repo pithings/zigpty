@@ -311,6 +311,43 @@ const inspector = new OSCInspector((event) => {
 
 The built-in registry is exposed as `builtinOSCDecoders: Record<number, OSCDecoderFn<DecodedOSC>>` if you want to inspect or reuse individual decoders.
 
+### Activity detector — `zigpty/activity`
+
+Implicit terminal-attention detection. Watches the PTY's output stream and emits an `idle` event when a burst of activity stops — typically meaning an interactive agent (Claude Code, aider, a REPL, …) is done streaming and waiting for input. Tuned to suppress the obvious false positives: the startup banner flood, tiny status-bar updates, and pure ANSI redraws.
+
+```ts
+import { spawn } from "zigpty";
+import { ActivityDetector } from "zigpty/activity";
+
+const detector = new ActivityDetector((event) => {
+  if (event.type === "active") console.log("agent started producing output");
+  if (event.type === "idle") console.log("agent likely waiting for input");
+});
+
+const pty = spawn("claude", []);
+pty.attach(detector); // ActivityDetector implements IPtyConsumer
+```
+
+How it filters false positives:
+
+| Knob              | Default  | What it does                                                                                                                                                                          |
+| ----------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `graceMs`         | `1500`   | Significant bytes arriving within this window after `attach` are silently absorbed. Hides the shell-init / prompt-render flood that always happens right when a PTY opens.            |
+| `activeThreshold` | `512`    | Minimum significant bytes in a single burst (gaps shorter than `quietMs`) before `active` fires. Status-bar pokes and cursor-blink redraws never accumulate enough to count.          |
+| `quietMs`         | `750`    | Time with no significant bytes before transitioning `active` → `idle`. Tuned for streaming agents that emit chunks every 50-200ms.                                                    |
+
+"Significant bytes" excludes ANSI/CSI/OSC escape sequences and other C0 control characters — only user-visible content counts toward the threshold, so heavily colored output doesn't masquerade as text and a pure spinner redraw contributes very few bytes per cycle.
+
+`ActivityDetector` has the same shape as `OSCInspector`: pass a listener (or `.on()` later), `.feed()` raw bytes if you're driving it yourself, and `.dispose()` to clean up. Events carry the previous state's `bytes` count and `durationMs` if you want to introspect bursts:
+
+```ts
+type ActivityEvent = {
+  type: "active" | "idle";
+  bytes: number;       // significant bytes accumulated during the previous state
+  durationMs: number;  // how long the previous state lasted
+};
+```
+
 ### `hasNative`
 
 Boolean — `true` when native Zig PTY bindings loaded successfully, `false` when running in pipe fallback mode.
