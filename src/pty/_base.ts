@@ -73,19 +73,38 @@ export abstract class BasePty implements IPty {
   attach(consumer: IPtyConsumer): IDisposable {
     consumer.onAttach?.(this);
 
-    const dataSub = this.onData((data) => {
+    const feed = (data: string | Buffer) => {
       try {
         consumer.feed(data);
       } catch {
         // Swallow consumer errors — never let one break the pty data path.
       }
-    });
+    };
+
+    let dataSub: IDisposable | undefined;
+    let terminalListener: ((data: string) => void) | undefined;
+    if (this._terminal) {
+      // When a Terminal is attached, it may own the underlying data stream
+      // (Unix). Listen through the Terminal to keep attach() consistent across
+      // platform implementations.
+      terminalListener = feed;
+      this._terminal._dataListeners.push(terminalListener);
+    } else {
+      dataSub = this.onData(feed);
+    }
 
     let detached = false;
     const detach = () => {
       if (detached) return;
       detached = true;
-      dataSub.dispose();
+      dataSub?.dispose();
+      if (terminalListener) {
+        const listeners = this._terminal?._dataListeners;
+        if (listeners) {
+          const idx = listeners.indexOf(terminalListener);
+          if (idx >= 0) listeners.splice(idx, 1);
+        }
+      }
       exitSub.dispose();
       try {
         consumer.onDetach?.(this);

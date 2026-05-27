@@ -235,7 +235,7 @@ const inspector = new OSCInspector((event) => {
     case "progress":
       console.log(`progress: ${decoded.value}%`);
       break;
-    // ...attention, tabColor, unknown
+    // ...attention, hyperlink, clipboard, unknown
   }
 });
 
@@ -248,10 +248,11 @@ pty.attach(inspector); // OSCInspector implements IPtyConsumer
 | Code            | `kind`                        | Notes                                                |
 | --------------- | ----------------------------- | ---------------------------------------------------- |
 | `0` / `1` / `2` | `title`                       | Window / tab / icon title                            |
-| `6`             | `tabColor`                    | Konsole tab color                                    |
 | `7`             | `cwd`                         | `file://host/path` — current working directory       |
+| `8`             | `hyperlink`                   | Anchor / close — `id`, `uri`, and `params`           |
 | `9`             | `progress` or `notification`  | ConEmu/Windows-Terminal progress, iTerm notification |
-| `99`            | `notification`                | Kitty desktop notification (title/body/done)         |
+| `52`            | `clipboard`                   | Selection set or query (`?`)                         |
+| `99`            | `notification`                | Kitty desktop notification (title/body/`done: true`) |
 | `133`           | `shellIntegration`            | FinalTerm shell integration marks (A/B/C/D)          |
 | `633`           | `shellIntegration`            | VS Code shell integration                            |
 | `777`           | `attention` or `notification` | rxvt urgency / notify                                |
@@ -264,18 +265,15 @@ pty.attach(inspector); // OSCInspector implements IPtyConsumer
 import { createOSCDecoder } from "zigpty/osc";
 
 const decode = createOSCDecoder({
-  // OSC 52 — clipboard
-  52: (payload) => {
-    const [sel, data] = payload.split(";");
-    return { kind: "clipboard" as const, selection: sel, data };
-  },
+  // OSC 50 — terminal font (xterm), not handled by built-ins
+  50: (payload) => ({ kind: "font" as const, value: payload }),
   // OSC 1338 — your custom vendor code
   1338: (payload) => ({ kind: "vendor-x" as const, raw: payload }),
 });
 
 const inspector = new OSCInspector((event) => {
   const d = decode(event);
-  // d: DecodedOSC | { kind: "clipboard"; ... } | { kind: "vendor-x"; ... }
+  // d: DecodedOSC | { kind: "font"; ... } | { kind: "vendor-x"; ... }
 });
 ```
 

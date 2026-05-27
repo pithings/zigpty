@@ -11,7 +11,14 @@ export type DecodedOSC =
   | { kind: "title"; code: 0 | 1 | 2; title: string }
   | { kind: "cwd"; uri: string; host?: string; path?: string }
   | { kind: "shellIntegration"; vendor: "vt" | "vscode"; command: string; data: string }
-  | { kind: "notification"; vendor: string; title?: string; body?: string; raw: string }
+  | {
+      kind: "notification";
+      vendor: string;
+      title?: string;
+      body?: string;
+      done?: boolean;
+      raw: string;
+    }
   | { kind: "progress"; state: number; value: number }
   | {
       kind: "attention";

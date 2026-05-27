@@ -69,6 +69,9 @@ const osc99Decoder: OSCDecoderFn<DecodedOSC> = (payload) => {
   if (which === "body") {
     return { kind: "notification", vendor: "kitty", body: value, raw: payload };
   }
+  if (which === "done") {
+    return { kind: "notification", vendor: "kitty", done: true, raw: payload };
+  }
   return { kind: "notification", vendor: "kitty", raw: payload };
 };
 

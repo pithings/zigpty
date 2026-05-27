@@ -180,6 +180,11 @@ describe("decodeOSC", () => {
       vendor: "kitty",
       body: "ok",
     });
+    expect(decodeOSC({ code: 99, payload: "i=1:p=done" })).toMatchObject({
+      kind: "notification",
+      vendor: "kitty",
+      done: true,
+    });
   });
 
   it("decodes OSC 1337 RequestAttention variants and notify", () => {
