@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.2.0
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.1.6...v0.2.0)
+
+### 🚀 Enhancements
+
+- Support attaching inspectors and osc decoder ([#6](https://github.com/pithings/zigpty/pull/6))
+- **osc:** Track terminal state on OSCInspector ([f1bfce4](https://github.com/pithings/zigpty/commit/f1bfce4))
+- Activity detector ([a9db5f7](https://github.com/pithings/zigpty/commit/a9db5f7))
+- Support using/await using for Terminal and spawn ([dc981ad](https://github.com/pithings/zigpty/commit/dc981ad))
+
+### 🩹 Fixes
+
+- **pty:** Keep exit tsfn ref'd so pty.exited resolves when idle ([#4](https://github.com/pithings/zigpty/pull/4))
+
+### 💅 Refactors
+
+- Migrate to zig 0.16 ([2bff4e4](https://github.com/pithings/zigpty/commit/2bff4e4))
+- Rename to IdleDetector ([aed1cc6](https://github.com/pithings/zigpty/commit/aed1cc6))
+
+### 🏡 Chore
+
+- Run format ([151d52d](https://github.com/pithings/zigpty/commit/151d52d))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+- Pi0x <x@pi0.io>
+
 ## v0.1.6
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.1.5...v0.1.6)
