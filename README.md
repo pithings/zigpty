@@ -332,11 +332,11 @@ pty.attach(detector); // IdleDetector implements IPtyConsumer
 
 How it filters false positives:
 
-| Knob              | Default  | What it does                                                                                                                                                                          |
-| ----------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `graceMs`         | `1500`   | Significant bytes arriving within this window after `attach` are silently absorbed. Hides the shell-init / prompt-render flood that always happens right when a PTY opens.            |
-| `activeThreshold` | `512`    | Minimum significant bytes in a single burst (gaps shorter than `quietMs`) before `active` fires. Status-bar pokes and cursor-blink redraws never accumulate enough to count.          |
-| `quietMs`         | `750`    | Time with no significant bytes before transitioning `active` → `idle`. Tuned for streaming agents that emit chunks every 50-200ms.                                                    |
+| Knob              | Default | What it does                                                                                                                                                                 |
+| ----------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `graceMs`         | `1500`  | Significant bytes arriving within this window after `attach` are silently absorbed. Hides the shell-init / prompt-render flood that always happens right when a PTY opens.   |
+| `activeThreshold` | `512`   | Minimum significant bytes in a single burst (gaps shorter than `quietMs`) before `active` fires. Status-bar pokes and cursor-blink redraws never accumulate enough to count. |
+| `quietMs`         | `750`   | Time with no significant bytes before transitioning `active` → `idle`. Tuned for streaming agents that emit chunks every 50-200ms.                                           |
 
 "Significant bytes" excludes ANSI/CSI/OSC escape sequences and other C0 control characters — only user-visible content counts toward the threshold, so heavily colored output doesn't masquerade as text and a pure spinner redraw contributes very few bytes per cycle.
 
@@ -345,8 +345,8 @@ How it filters false positives:
 ```ts
 type IdleEvent = {
   type: "active" | "idle";
-  bytes: number;       // significant bytes accumulated for the output burst
-  durationMs: number;  // how long the previous state lasted
+  bytes: number; // significant bytes accumulated for the output burst
+  durationMs: number; // how long the previous state lasted
 };
 ```
 

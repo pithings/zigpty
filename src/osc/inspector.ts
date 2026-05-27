@@ -216,7 +216,8 @@ export class OSCInspector implements IPtyConsumer {
           if (s.progress === undefined) return false;
           s.progress = undefined;
         } else {
-          s.progress = d.value === undefined ? { state: d.state } : { state: d.state, value: d.value };
+          s.progress =
+            d.value === undefined ? { state: d.state } : { state: d.state, value: d.value };
         }
         return true;
       }
