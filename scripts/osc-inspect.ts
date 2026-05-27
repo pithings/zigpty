@@ -79,7 +79,7 @@ function format(d: Decoded, code: number): string {
     case "title":
       return `[title ${d.code}] ${d.title}`;
     case "cwd":
-      return `[cwd] ${d.path ?? d.uri}${d.host ? `  @${d.host}` : ""}`;
+      return `[cwd:${d.source}] ${d.path}${d.host ? `  @${d.host}` : ""}`;
     case "shellIntegration":
       return `[${d.vendor}-integration ${d.command}]${d.data ? ` ${d.data}` : ""}`;
     case "notification": {
@@ -87,17 +87,25 @@ function format(d: Decoded, code: number): string {
       return `[notify:${d.vendor}] ${parts || d.raw}`;
     }
     case "progress":
-      return `[progress] state=${d.state} value=${d.value}`;
+      return `[progress] state=${d.state}${d.value !== undefined ? ` value=${d.value}` : ""}`;
     case "attention":
       return `[attention] ${d.raw}`;
     case "hyperlink":
-      return d.uri
-        ? `[hyperlink${d.id ? ` id=${d.id}` : ""}] ${d.uri}`
-        : `[hyperlink:close]`;
+      return d.action === "close"
+        ? `[hyperlink:close]`
+        : `[hyperlink${d.id ? ` id=${d.id}` : ""}] ${d.uri}`;
     case "clipboard":
-      return d.query
-        ? `[clipboard:${d.selection}] ?`
-        : `[clipboard:${d.selection}] ${d.data ?? ""}`;
+      if (d.query) return `[clipboard:${d.selection}] ?`;
+      if (d.clear) return `[clipboard:${d.selection}] <clear>`;
+      return `[clipboard:${d.selection}] ${d.data ?? ""}`;
+    case "mark":
+      return `[mark:${d.vendor}]`;
+    case "userVar":
+      return `[userVar:${d.vendor}] ${d.name}=${d.value}`;
+    case "remoteHost":
+      return `[remoteHost:${d.vendor}] ${d.user ? `${d.user}@` : ""}${d.host}`;
+    case "shellIntegrationVersion":
+      return `[shellIntegrationVersion:${d.vendor}] ${d.version}`;
     case "demo-vendor":
       return `[demo-vendor] ${d.payload}`;
     case "unknown":

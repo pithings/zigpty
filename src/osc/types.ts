@@ -9,27 +9,118 @@ export interface OSCEvent {
 /** Decoded shapes for well-known OSC codes. */
 export type DecodedOSC =
   | { kind: "title"; code: 0 | 1 | 2; title: string }
-  | { kind: "cwd"; uri: string; host?: string; path?: string }
-  | { kind: "shellIntegration"; vendor: "vt" | "vscode"; command: string; data: string }
+  | {
+      kind: "cwd";
+      /** Where this CWD was reported from. */
+      source: "osc7" | "conemu" | "iterm";
+      /** Decoded filesystem path (percent-decoded for OSC 7). */
+      path: string;
+      /** Raw URI — only present for OSC 7. */
+      uri?: string;
+      /** URI scheme (`file`, `kitty-shell-cwd`, …) — only present for OSC 7. */
+      scheme?: string;
+      /** Host from the OSC 7 URI authority — `undefined` when empty. */
+      host?: string;
+      /** True when `host` is empty or `localhost` (OSC 7). */
+      local?: boolean;
+    }
+  | {
+      kind: "shellIntegration";
+      vendor: "vt" | "vscode";
+      /** Sub-command letter or word (e.g. `A`, `B`, `C`, `D`, `EnvSingleStart`). */
+      command: string;
+      /** Remainder after the command, joined by `;`. Empty when no data. */
+      data: string;
+      /** Parsed exit code for `D`. */
+      exitCode?: number;
+      /** Parsed `err=` value for OSC 133 `D` (empty string = success). */
+      err?: string;
+      /** Parsed `key=value` extras (kitty `A`/`C`; vscode `P`). */
+      params?: Record<string, string>;
+      /** Parsed key for vscode `P;<Key>=<Value>` / `EnvSingleEntry`. */
+      key?: string;
+      /** Parsed value for vscode `P;<Key>=<Value>` / `EnvSingleEntry`. */
+      value?: string;
+      /** Parsed command line for vscode `E`. */
+      commandLine?: string;
+      /** Parsed nonce for vscode `E` / `EnvSingle*`. */
+      nonce?: string;
+      /** Index for vscode `EnvSingleStart`. */
+      index?: number;
+    }
   | {
       kind: "notification";
-      vendor: string;
+      vendor: "iterm" | "conemu" | "kitty" | "rxvt";
       title?: string;
       body?: string;
-      done?: boolean;
+      /** kitty: notification identifier ties chunks together. */
+      id?: string;
+      /** kitty: 0=low, 1=normal, 2=critical. */
+      urgency?: 0 | 1 | 2;
+      /** kitty: `d=0` — more chunks pending. */
+      partial?: boolean;
+      /** kitty: non-payload phase (`close`, `alive`, `icon`, `buttons`, `?`). */
+      phase?: string;
       raw: string;
     }
-  | { kind: "progress"; state: number; value: number }
+  | {
+      kind: "progress";
+      /** 0=remove, 1=normal, 2=error, 3=indeterminate, 4=paused. */
+      state: number;
+      /** 0-100. Omitted for states 0/3 and optional for 2/4. */
+      value?: number;
+    }
   | {
       kind: "attention";
+      vendor: "iterm";
+      action: "request" | "cancel";
+      effect?: "fireworks" | "once";
+      value: string;
       raw: string;
-      vendor?: "iterm" | "rxvt" | string;
-      action?: "request" | "cancel" | "push" | "pop" | string;
-      effect?: "fireworks" | string;
-      value?: string;
     }
-  | { kind: "hyperlink"; uri: string; id?: string; params: Record<string, string> }
-  | { kind: "clipboard"; selection: string; data?: string; query?: boolean }
+  | {
+      kind: "hyperlink";
+      /** `open` = active hyperlink begins; `close` = empty-URI terminator. */
+      action: "open" | "close";
+      uri: string;
+      id?: string;
+      params: Record<string, string>;
+    }
+  | {
+      kind: "clipboard";
+      /** Raw `Pc` field (may be empty for default `s0`, may be multi-char). */
+      selection: string;
+      /** `Pc` split into individual selection chars (`cs` → `['c','s']`). */
+      selections: string[];
+      /** Base64-encoded data (when setting). */
+      data?: string;
+      /** True for `?` query. */
+      query?: boolean;
+      /** True when `Pd` is neither base64 nor `?` (xterm-spec: clear clipboard). */
+      clear?: boolean;
+    }
+  | { kind: "mark"; vendor: "iterm" | "conemu"; raw: string }
+  | {
+      kind: "userVar";
+      vendor: "iterm";
+      name: string;
+      /** Base64-decoded value. */
+      value: string;
+      raw: string;
+    }
+  | {
+      kind: "remoteHost";
+      vendor: "iterm";
+      user?: string;
+      host: string;
+      raw: string;
+    }
+  | {
+      kind: "shellIntegrationVersion";
+      vendor: "iterm";
+      version: string;
+      raw: string;
+    }
   | { kind: "unknown"; code: number; payload: string };
 
 /** Listener for raw OSC events. */
