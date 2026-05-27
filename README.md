@@ -45,20 +45,22 @@ pty.onData((data) => process.stdout.write(data));
 pty.onExit(({ exitCode }) => console.log("exited:", exitCode));
 ```
 
-The `Terminal` class can be reused across multiple spawns and supports `AsyncDisposable`:
+Both `spawn()` and `Terminal` support automatic disposal — `await using` for `spawn()` waits for the process to actually exit, and `using` for `Terminal` closes the PTY synchronously:
 
 ```ts
 import { spawn, Terminal } from "zigpty";
 
-await using terminal = new Terminal({
+using terminal = new Terminal({
   data(term, data) {
     process.stdout.write(data);
   },
 });
 
-const pty = spawn("/bin/sh", ["-c", "echo hello"], { terminal });
-await pty.exited;
-// terminal.close() called automatically by `await using`
+{
+  await using pty = spawn("/bin/sh", ["-c", "echo hello"], { terminal });
+  // ...do stuff...
+} // pty.close() runs; block awaits process exit before continuing
+// terminal.close() runs when the outer scope exits
 ```
 
 ## API
@@ -146,8 +148,8 @@ Wait until the PTY output contains the given string. Returns all output collecte
 ```ts
 import { spawn, Terminal } from "zigpty";
 
-// Terminal provides callback-based data handling and AsyncDisposable cleanup
-await using terminal = new Terminal({
+// Terminal provides callback-based data handling and `using` cleanup
+using terminal = new Terminal({
   cols: 100,
   rows: 30,
   // Nice to meet you, zigpty! Zig is a great choice!

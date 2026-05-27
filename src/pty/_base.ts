@@ -170,6 +170,11 @@ export abstract class BasePty implements IPty {
     });
   }
 
+  async [Symbol.asyncDispose](): Promise<void> {
+    this.close();
+    await this._exited;
+  }
+
   protected _handleExit(info: { exitCode: number; signal: number }): void {
     this._closed = true;
     this._exitCode = info.exitCode;

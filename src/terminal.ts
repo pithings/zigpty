@@ -27,9 +27,9 @@ export interface TerminalOptions {
  * Can be created standalone via `new Terminal()` or passed to `spawn()` via the
  * `terminal` option for callback-based data handling.
  *
- * Supports `AsyncDisposable` (`await using`).
+ * Supports `Disposable` (`using`) — close is synchronous.
  */
-export class Terminal implements AsyncDisposable {
+export class Terminal implements Disposable {
   stdin: number;
   stdout: number;
 
@@ -149,7 +149,7 @@ export class Terminal implements AsyncDisposable {
     this._onExit?.(this, 0, null);
   }
 
-  async [Symbol.asyncDispose](): Promise<void> {
+  [Symbol.dispose](): void {
     this.close();
   }
 

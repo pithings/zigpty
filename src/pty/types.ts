@@ -59,7 +59,7 @@ export interface IPtyStats {
   children: IPtyChildStats[];
 }
 
-export interface IPty {
+export interface IPty extends AsyncDisposable {
   /** Process ID of the spawned process. */
   pid: number;
   /** Number of columns. */

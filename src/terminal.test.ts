@@ -24,10 +24,10 @@ describe("Terminal", () => {
     terminal.close();
   });
 
-  it("should support AsyncDisposable", async () => {
+  it("should support Disposable", () => {
     let closed = false;
     {
-      await using terminal = new Terminal({
+      using terminal = new Terminal({
         exit() {
           closed = true;
         },
@@ -243,5 +243,18 @@ describe("spawn with terminal option", () => {
     pty.kill("SIGKILL");
     await pty.exited;
     expect(pty.exitCode).not.toBeNull();
+  });
+
+  it("should support AsyncDisposable", async () => {
+    const cmd = isWindows ? [] : ["-c", "sleep 60"];
+    let exitCode: number | null = null;
+    {
+      await using pty = spawn(shell, cmd);
+      expect(pty.pid).toBeGreaterThan(0);
+      pty.onExit(({ exitCode: code }) => {
+        exitCode = code;
+      });
+    }
+    expect(exitCode).not.toBeNull();
   });
 });
