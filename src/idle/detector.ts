@@ -1,17 +1,13 @@
 import { Buffer } from "node:buffer";
 import type { IPty, IPtyConsumer } from "../pty/types.ts";
-import type {
-  ActivityDetectorOptions,
-  ActivityEvent,
-  ActivityListener,
-  ActivityState,
-} from "./types.ts";
+import type { IdleDetectorOptions, IdleEvent, IdleListener, IdleState } from "./types.ts";
 
 const Ground = 0;
 const Esc = 1;
 const Csi = 2;
 const Osc = 3;
-type EscState = 0 | 1 | 2 | 3;
+const OscSt = 4;
+type EscState = 0 | 1 | 2 | 3 | 4;
 
 /**
  * Implicit terminal-attention detector.
@@ -30,26 +26,26 @@ type EscState = 0 | 1 | 2 | 3;
  *
  * @example
  * ```ts
- * const det = new ActivityDetector((e) => {
+ * const det = new IdleDetector((e) => {
  *   if (e.type === "idle") console.log("agent likely waiting for input");
  * });
  * pty.attach(det);
  * ```
  */
-export class ActivityDetector implements IPtyConsumer {
-  private _state: ActivityState = "idle";
+export class IdleDetector implements IPtyConsumer {
+  private _state: IdleState = "idle";
   private _bytesPending = 0;
   private _stateStart: number;
   private _attachAt: number;
   private _lastSigTime: number;
   private _idleTimer: ReturnType<typeof setTimeout> | null = null;
   private _escState: EscState = Ground;
-  private _listeners: ActivityListener[] = [];
+  private _listeners: IdleListener[] = [];
   private readonly _quietMs: number;
   private readonly _activeThreshold: number;
   private readonly _graceMs: number;
 
-  constructor(listener?: ActivityListener, options: ActivityDetectorOptions = {}) {
+  constructor(listener?: IdleListener, options: IdleDetectorOptions = {}) {
     this._quietMs = options.quietMs ?? 750;
     this._activeThreshold = options.activeThreshold ?? 512;
     this._graceMs = options.graceMs ?? 1500;
@@ -60,8 +56,8 @@ export class ActivityDetector implements IPtyConsumer {
     if (listener) this._listeners.push(listener);
   }
 
-  /** Subscribe to activity transitions. Returns a disposer. */
-  on(listener: ActivityListener): () => void {
+  /** Subscribe to idle/active transitions. Returns a disposer. */
+  on(listener: IdleListener): () => void {
     this._listeners.push(listener);
     return () => {
       const idx = this._listeners.indexOf(listener);
@@ -70,7 +66,7 @@ export class ActivityDetector implements IPtyConsumer {
   }
 
   /** Current state (`idle` initially). */
-  get state(): ActivityState {
+  get state(): IdleState {
     return this._state;
   }
 
@@ -117,7 +113,6 @@ export class ActivityDetector implements IPtyConsumer {
         const prevBytes = this._bytesPending;
         const prevDuration = now - this._stateStart;
         this._state = "active";
-        this._bytesPending = 0;
         this._stateStart = now;
         this._emit({ type: "active", bytes: prevBytes, durationMs: prevDuration });
         this._scheduleIdle();
@@ -185,18 +180,29 @@ export class ActivityDetector implements IPtyConsumer {
           if (b >= 0x40 && b <= 0x7e) this._escState = Ground;
           break;
         case Osc:
-          // OSC terminates on BEL or ST (ESC \). Treat any ESC as the
-          // start of ST — the next byte (usually 0x5c) ends the sequence,
-          // matching what OSCInspector does.
+          // OSC terminates on BEL or ST (ESC \). A stray ESC can also be
+          // the start of a following escape sequence, so keep a dedicated
+          // intermediate state instead of falling back to generic ESC.
           if (b === 0x07) this._escState = Ground;
-          else if (b === 0x1b) this._escState = Esc;
+          else if (b === 0x1b) this._escState = OscSt;
+          break;
+        case OscSt:
+          if (b === 0x5c) {
+            this._escState = Ground;
+          } else if (b === 0x1b) {
+            // Abort current OSC, but treat this ESC as the start of a
+            // possible next sequence (same recovery strategy as OSCInspector).
+            this._escState = Esc;
+          } else {
+            this._escState = Ground;
+          }
           break;
       }
     }
     return count;
   }
 
-  private _emit(event: ActivityEvent): void {
+  private _emit(event: IdleEvent): void {
     for (const l of this._listeners) {
       try {
         l(event);

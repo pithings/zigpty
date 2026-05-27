@@ -1,20 +1,20 @@
-/** Activity state — either nothing meaningful is flowing, or output is in flight. */
-export type ActivityState = "idle" | "active";
+/** Detector state — either nothing meaningful is flowing, or output is in flight. */
+export type IdleState = "idle" | "active";
 
 /** Emitted on every state transition. */
-export interface ActivityEvent {
+export interface IdleEvent {
   /** New state after the transition. */
-  type: ActivityState;
-  /** Significant content bytes (ANSI/control bytes excluded) accumulated during the previous state. */
+  type: IdleState;
+  /** Significant content bytes (ANSI/control bytes excluded) accumulated for the output burst. */
   bytes: number;
   /** How long the previous state lasted, in ms. */
   durationMs: number;
 }
 
-/** Listener for activity transitions. */
-export type ActivityListener = (event: ActivityEvent) => void;
+/** Listener for idle-detector transitions. */
+export type IdleListener = (event: IdleEvent) => void;
 
-export interface ActivityDetectorOptions {
+export interface IdleDetectorOptions {
   /**
    * Quiet period (ms) with no significant bytes before transitioning
    * `active` → `idle`. This is the main "attention" signal — when output

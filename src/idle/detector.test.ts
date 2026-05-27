@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ActivityDetector, type ActivityEvent } from "./index.ts";
+import { IdleDetector, type IdleEvent } from "./index.ts";
 
-describe("ActivityDetector", () => {
+describe("IdleDetector", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
@@ -13,8 +13,8 @@ describe("ActivityDetector", () => {
   });
 
   it("fires active then idle after a sustained burst", async () => {
-    const events: ActivityEvent[] = [];
-    const det = new ActivityDetector((e) => events.push(e), {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
       graceMs: 0,
       activeThreshold: 32,
       quietMs: 500,
@@ -27,8 +27,8 @@ describe("ActivityDetector", () => {
   });
 
   it("absorbs startup bytes during the grace period", async () => {
-    const events: ActivityEvent[] = [];
-    const det = new ActivityDetector((e) => events.push(e), {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
       graceMs: 1000,
       activeThreshold: 16,
       quietMs: 500,
@@ -46,8 +46,8 @@ describe("ActivityDetector", () => {
   });
 
   it("ignores small UI updates below the threshold", async () => {
-    const events: ActivityEvent[] = [];
-    const det = new ActivityDetector((e) => events.push(e), {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
       graceMs: 0,
       activeThreshold: 256,
       quietMs: 500,
@@ -63,8 +63,8 @@ describe("ActivityDetector", () => {
   });
 
   it("does not count ANSI/CSI escapes toward the threshold", async () => {
-    const events: ActivityEvent[] = [];
-    const det = new ActivityDetector((e) => events.push(e), {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
       graceMs: 0,
       activeThreshold: 100,
       quietMs: 500,
@@ -79,8 +79,8 @@ describe("ActivityDetector", () => {
   });
 
   it("handles ANSI sequences split across feed calls", async () => {
-    const events: ActivityEvent[] = [];
-    const det = new ActivityDetector((e) => events.push(e), {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
       graceMs: 0,
       activeThreshold: 1,
       quietMs: 500,
@@ -95,9 +95,24 @@ describe("ActivityDetector", () => {
     det.dispose();
   });
 
+  it("does not count OSC payload after stray ESC recovery", async () => {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
+      graceMs: 0,
+      activeThreshold: 4,
+      quietMs: 500,
+    });
+    // A stray ESC inside one OSC followed by ESC ] starts another OSC. The
+    // second OSC payload is still non-visible and should not count as text.
+    det.feed("\x1b]0;abort\x1b\x1b]1;not visible\x07");
+    await vi.advanceTimersByTimeAsync(600);
+    expect(events).toEqual([]);
+    det.dispose();
+  });
+
   it("resets the idle timer while bytes keep flowing", async () => {
-    const events: ActivityEvent[] = [];
-    const det = new ActivityDetector((e) => events.push(e), {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
       graceMs: 0,
       activeThreshold: 16,
       quietMs: 500,
@@ -119,8 +134,8 @@ describe("ActivityDetector", () => {
   });
 
   it("reports significant byte count and duration on transitions", async () => {
-    const events: ActivityEvent[] = [];
-    const det = new ActivityDetector((e) => events.push(e), {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
       graceMs: 0,
       activeThreshold: 10,
       quietMs: 500,
@@ -129,16 +144,17 @@ describe("ActivityDetector", () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(events).toHaveLength(2);
     expect(events[0]!.type).toBe("active");
-    expect(events[0]!.bytes).toBeGreaterThanOrEqual(10);
+    expect(events[0]!.bytes).toBe(12);
     expect(events[1]!.type).toBe("idle");
+    expect(events[1]!.bytes).toBe(12);
     expect(events[1]!.durationMs).toBeGreaterThanOrEqual(500);
     det.dispose();
   });
 
   it("supports multiple listeners and unsubscribe", async () => {
-    const a: ActivityEvent[] = [];
-    const b: ActivityEvent[] = [];
-    const det = new ActivityDetector(undefined, {
+    const a: IdleEvent[] = [];
+    const b: IdleEvent[] = [];
+    const det = new IdleDetector(undefined, {
       graceMs: 0,
       activeThreshold: 4,
       quietMs: 500,
@@ -155,7 +171,7 @@ describe("ActivityDetector", () => {
   });
 
   it("swallows listener errors so detection keeps working", async () => {
-    const det = new ActivityDetector(
+    const det = new IdleDetector(
       () => {
         throw new Error("boom");
       },
@@ -167,8 +183,8 @@ describe("ActivityDetector", () => {
   });
 
   it("accepts Buffer and Uint8Array input", async () => {
-    const events: ActivityEvent[] = [];
-    const det = new ActivityDetector((e) => events.push(e), {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
       graceMs: 0,
       activeThreshold: 4,
       quietMs: 500,
@@ -180,8 +196,8 @@ describe("ActivityDetector", () => {
   });
 
   it("dispose() cancels the pending idle timer", async () => {
-    const events: ActivityEvent[] = [];
-    const det = new ActivityDetector((e) => events.push(e), {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
       graceMs: 0,
       activeThreshold: 4,
       quietMs: 500,
@@ -195,8 +211,8 @@ describe("ActivityDetector", () => {
   });
 
   it("onAttach resets the grace window from the attach time", async () => {
-    const events: ActivityEvent[] = [];
-    const det = new ActivityDetector((e) => events.push(e), {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
       graceMs: 500,
       activeThreshold: 4,
       quietMs: 500,
