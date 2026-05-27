@@ -7,6 +7,7 @@ import {
   OSCInspector,
   type DecodedOSC,
   type OSCEvent,
+  type OSCState,
 } from "./index.ts";
 
 describe("OSCInspector", () => {
@@ -112,6 +113,124 @@ describe("OSCInspector", () => {
     // ESC ] 0 ; abort ESC <not-backslash-not-ESC> => abort; the next ESC ] starts a new OSC.
     i.feed("\x1b]0;abort\x1b\x1b]1;ok\x07");
     expect(events).toEqual([{ code: 1, payload: "ok" }]);
+    i.dispose();
+  });
+});
+
+describe("OSCInspector.state", () => {
+  it("tracks title (OSC 2) and icon (OSC 1) separately, OSC 0 sets both", () => {
+    const i = new OSCInspector();
+    i.feed("\x1b]2;window\x07");
+    expect(i.state).toEqual({ title: "window" });
+    i.feed("\x1b]1;icon\x07");
+    expect(i.state).toEqual({ title: "window", iconName: "icon" });
+    i.feed("\x1b]0;both\x07");
+    expect(i.state).toEqual({ title: "both", iconName: "both" });
+    i.dispose();
+  });
+
+  it("tracks cwd from OSC 7, OSC 1337 CurrentDir, and OSC 9;9", () => {
+    const i = new OSCInspector();
+    i.feed("\x1b]7;file://host/var/log\x07");
+    expect(i.state.cwd).toEqual({ path: "/var/log", source: "osc7", host: "host" });
+    i.feed("\x1b]1337;CurrentDir=/home/foo\x07");
+    expect(i.state.cwd).toEqual({ path: "/home/foo", source: "iterm" });
+    i.feed("\x1b]9;9;C:\\Users\\dev\x07");
+    expect(i.state.cwd).toEqual({ path: "C:\\Users\\dev", source: "conemu" });
+    i.dispose();
+  });
+
+  it("tracks active hyperlink between open and close", () => {
+    const i = new OSCInspector();
+    i.feed("\x1b]8;id=42;https://example.com\x07");
+    expect(i.state.hyperlink).toEqual({
+      uri: "https://example.com",
+      id: "42",
+      params: { id: "42" },
+    });
+    i.feed("\x1b]8;;\x07");
+    expect(i.state.hyperlink).toBeUndefined();
+    i.dispose();
+  });
+
+  it("tracks progress and clears on state 0", () => {
+    const i = new OSCInspector();
+    i.feed("\x1b]9;4;1;75\x07");
+    expect(i.state.progress).toEqual({ state: 1, value: 75 });
+    i.feed("\x1b]9;4;3\x07");
+    expect(i.state.progress).toEqual({ state: 3 });
+    i.feed("\x1b]9;4;0\x07");
+    expect(i.state.progress).toBeUndefined();
+    i.dispose();
+  });
+
+  it("tracks remoteHost, shellIntegrationVersion, and userVars", () => {
+    const i = new OSCInspector();
+    i.feed("\x1b]1337;RemoteHost=alice@example.com\x07");
+    expect(i.state.remoteHost).toEqual({ user: "alice", host: "example.com" });
+    i.feed("\x1b]1337;ShellIntegrationVersion=5\x07");
+    expect(i.state.shellIntegrationVersion).toEqual("5");
+    const base64 = Buffer.from("hello", "utf8").toString("base64");
+    i.feed(`\x1b]1337;SetUserVar=greeting=${base64}\x07`);
+    i.feed(`\x1b]1337;SetUserVar=other=${Buffer.from("world", "utf8").toString("base64")}\x07`);
+    expect(i.state.userVars).toEqual({ greeting: "hello", other: "world" });
+    i.dispose();
+  });
+
+  it("does not touch state for non-state sequences (notifications, marks, clipboard)", () => {
+    const i = new OSCInspector();
+    i.feed("\x1b]9;Build done\x07");
+    i.feed("\x1b]1337;SetMark\x07");
+    i.feed("\x1b]52;c;aGVsbG8=\x07");
+    expect(i.state).toEqual({});
+    i.dispose();
+  });
+
+  it("notifies state listeners only when state mutates", () => {
+    const i = new OSCInspector();
+    const snapshots: OSCState[] = [];
+    i.onStateChange((s) => snapshots.push({ ...s }));
+    i.feed("\x1b]0;t1\x07");
+    i.feed("\x1b]9;Build done\x07"); // notification — no state change
+    i.feed("\x1b]2;t2\x07");
+    expect(snapshots).toEqual([
+      { title: "t1", iconName: "t1" },
+      { title: "t2", iconName: "t1" },
+    ]);
+    i.dispose();
+  });
+
+  it("state listeners can read fresh state synchronously", () => {
+    const i = new OSCInspector();
+    let observed: string | undefined;
+    i.onStateChange((s) => {
+      observed = s.title;
+    });
+    i.feed("\x1b]2;hello\x07");
+    expect(observed).toEqual("hello");
+    i.dispose();
+  });
+
+  it("dispose clears state", () => {
+    const i = new OSCInspector();
+    i.feed("\x1b]2;t\x07");
+    i.feed("\x1b]7;file:///tmp\x07");
+    expect(i.state.title).toEqual("t");
+    expect(i.state.cwd?.path).toEqual("/tmp");
+    i.dispose();
+    expect(i.state).toEqual({});
+  });
+
+  it("onStateChange returns a working disposer", () => {
+    const i = new OSCInspector();
+    let n = 0;
+    const off = i.onStateChange(() => {
+      n++;
+    });
+    i.feed("\x1b]2;a\x07");
+    off();
+    i.feed("\x1b]2;b\x07");
+    expect(n).toEqual(1);
     i.dispose();
   });
 });

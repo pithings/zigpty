@@ -254,6 +254,27 @@ const pty = spawn("/bin/bash");
 pty.attach(inspector); // OSCInspector implements IPtyConsumer
 ```
 
+**Stateful inspection** — the inspector maintains an `OSCState` snapshot of the durable, observable state seen so far (title, icon name, cwd, active hyperlink, taskbar progress, remote host, shell-integration version, user vars). State is updated in place before listeners fire, so handlers can read fresh values. Action-like sequences (notifications, marks, clipboard writes, attention requests) don't touch state.
+
+```ts
+const inspector = new OSCInspector();
+pty.attach(inspector);
+
+inspector.onStateChange((state) => {
+  // Fires only on sequences that actually mutated state.
+  console.log("title:", state.title);
+  console.log("cwd:", state.cwd?.path);
+  console.log("progress:", state.progress); // undefined after "remove" (state 0)
+  console.log("hyperlink:", state.hyperlink?.uri); // undefined between links
+});
+
+// Or pull synchronously at any time:
+inspector.state.title; // string | undefined
+inspector.state.userVars?.greeting; // base64-decoded SetUserVar values
+```
+
+Specifics: OSC 0 sets both `title` and `iconName`; OSC 1 sets `iconName` only; OSC 2 sets `title` only. `cwd` is unified across OSC 7, OSC 1337 `CurrentDir=`, and OSC 9;9 with a `source` discriminator. `hyperlink` is cleared on OSC 8 close (empty URI). `progress` is cleared when state 0 is reported. `dispose()` clears state.
+
 **Decoded shapes** (`DecodedOSC` union) cover the common codes out of the box:
 
 | Code            | `kind`(s)                                                                                         | Notes                                                                                                                                                    |

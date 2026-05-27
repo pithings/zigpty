@@ -126,6 +126,51 @@ export type DecodedOSC =
 /** Listener for raw OSC events. */
 export type OSCListener = (event: OSCEvent) => void;
 
+/**
+ * Terminal state derived from OSC sequences seen so far.
+ *
+ * Populated by {@link OSCInspector} as it parses incoming bytes. Only
+ * sequences that represent durable, observable state are folded in here —
+ * action-like sequences (clipboard writes, notifications, marks, attention
+ * requests) are still emitted to listeners but don't update state.
+ */
+export interface OSCState {
+  /** Window title — last value from OSC 0 or OSC 2. */
+  title?: string;
+  /** Icon / tab name — last value from OSC 0 or OSC 1. */
+  iconName?: string;
+  /** Current working directory — from OSC 7, OSC 1337 `CurrentDir`, or OSC 9;9. */
+  cwd?: {
+    path: string;
+    source: "osc7" | "conemu" | "iterm";
+    /** Host from the OSC 7 URI authority (only when present and non-empty). */
+    host?: string;
+  };
+  /** Active hyperlink between OSC 8 open and OSC 8 close. */
+  hyperlink?: {
+    uri: string;
+    id?: string;
+    params: Record<string, string>;
+  };
+  /** Latest taskbar progress (OSC 9;4). Cleared when state 0 is reported. */
+  progress?: {
+    state: number;
+    value?: number;
+  };
+  /** Remote host (OSC 1337 `RemoteHost`). */
+  remoteHost?: {
+    user?: string;
+    host: string;
+  };
+  /** iTerm shell-integration version (OSC 1337 `ShellIntegrationVersion`). */
+  shellIntegrationVersion?: string;
+  /** User-defined variables set via OSC 1337 `SetUserVar`. */
+  userVars?: Record<string, string>;
+}
+
+/** Listener for state changes. Called after each OSC sequence that mutated state. */
+export type OSCStateListener = (state: Readonly<OSCState>) => void;
+
 /** Signature for an OSC decoder. `payload` is split out for ergonomics. */
 export type OSCDecoderFn<T> = (payload: string, event: OSCEvent) => T;
 

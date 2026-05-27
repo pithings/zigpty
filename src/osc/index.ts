@@ -14,4 +14,6 @@ export type {
   OSCDecoderMap,
   OSCEvent,
   OSCListener,
+  OSCState,
+  OSCStateListener,
 } from "./types.ts";

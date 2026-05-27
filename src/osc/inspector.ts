@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { IPtyConsumer } from "../pty/types.ts";
-import type { OSCEvent, OSCListener } from "./types.ts";
+import { decodeOSC } from "./decode.ts";
+import type { DecodedOSC, OSCEvent, OSCListener, OSCState, OSCStateListener } from "./types.ts";
 
 const MAX_PAYLOAD = 4096;
 
@@ -31,6 +32,14 @@ export class OSCInspector implements IPtyConsumer {
   private _len = 0;
   private _overflow = false;
   private _listeners: OSCListener[] = [];
+  private _stateListeners: OSCStateListener[] = [];
+
+  /**
+   * Terminal state derived from the sequences seen so far. Mutated in place
+   * before listeners fire, so handlers can read fresh values. Treat as
+   * read-only — direct mutation will not notify state listeners.
+   */
+  readonly state: OSCState = {};
 
   constructor(listener?: OSCListener) {
     if (listener) this._listeners.push(listener);
@@ -45,6 +54,18 @@ export class OSCInspector implements IPtyConsumer {
     };
   }
 
+  /**
+   * Subscribe to state changes. The listener is invoked after each OSC
+   * sequence that mutated {@link state}. Returns a disposer.
+   */
+  onStateChange(listener: OSCStateListener): () => void {
+    this._stateListeners.push(listener);
+    return () => {
+      const idx = this._stateListeners.indexOf(listener);
+      if (idx >= 0) this._stateListeners.splice(idx, 1);
+    };
+  }
+
   /** Feed bytes into the parser. Accepts string (utf-8), Buffer, or Uint8Array. */
   feed(data: string | Buffer | Uint8Array): void {
     const bytes =
@@ -56,12 +77,16 @@ export class OSCInspector implements IPtyConsumer {
     for (let i = 0; i < bytes.length; i++) this._feedByte(bytes[i]!);
   }
 
-  /** Drop all listeners and reset parser state. */
+  /** Drop all listeners and reset parser + derived state. */
   dispose(): void {
     this._listeners.length = 0;
+    this._stateListeners.length = 0;
     this._state = Ground;
     this._len = 0;
     this._overflow = false;
+    for (const k of Object.keys(this.state)) {
+      delete (this.state as Record<string, unknown>)[k];
+    }
   }
 
   private _feedByte(b: number): void {
@@ -130,6 +155,7 @@ export class OSCInspector implements IPtyConsumer {
         payload = semi >= 0 ? data.slice(semi + 1) : "";
       }
       const event: OSCEvent = { code, payload };
+      const mutated = this._applyToState(decodeOSC(event));
       for (const l of this._listeners) {
         try {
           l(event);
@@ -137,9 +163,78 @@ export class OSCInspector implements IPtyConsumer {
           // Swallow listener errors — never let one break parsing.
         }
       }
+      if (mutated) {
+        for (const l of this._stateListeners) {
+          try {
+            l(this.state);
+          } catch {
+            // Swallow listener errors — never let one break parsing.
+          }
+        }
+      }
     }
     this._state = Ground;
     this._len = 0;
     this._overflow = false;
+  }
+
+  private _applyToState(d: DecodedOSC): boolean {
+    const s = this.state as OSCState;
+    switch (d.kind) {
+      case "title": {
+        // OSC 0 sets both window title + icon name; 1 = icon only; 2 = title only.
+        if (d.code === 0) {
+          s.title = d.title;
+          s.iconName = d.title;
+        } else if (d.code === 1) {
+          s.iconName = d.title;
+        } else {
+          s.title = d.title;
+        }
+        return true;
+      }
+      case "cwd": {
+        s.cwd = d.host
+          ? { path: d.path, source: d.source, host: d.host }
+          : { path: d.path, source: d.source };
+        return true;
+      }
+      case "hyperlink": {
+        if (d.action === "close") {
+          if (s.hyperlink === undefined) return false;
+          s.hyperlink = undefined;
+        } else {
+          s.hyperlink = d.id
+            ? { uri: d.uri, id: d.id, params: d.params }
+            : { uri: d.uri, params: d.params };
+        }
+        return true;
+      }
+      case "progress": {
+        // state 0 = remove progress indicator.
+        if (d.state === 0) {
+          if (s.progress === undefined) return false;
+          s.progress = undefined;
+        } else {
+          s.progress = d.value === undefined ? { state: d.state } : { state: d.state, value: d.value };
+        }
+        return true;
+      }
+      case "remoteHost": {
+        s.remoteHost = d.user ? { user: d.user, host: d.host } : { host: d.host };
+        return true;
+      }
+      case "shellIntegrationVersion": {
+        s.shellIntegrationVersion = d.version;
+        return true;
+      }
+      case "userVar": {
+        const vars = s.userVars ?? (s.userVars = {});
+        vars[d.name] = d.value;
+        return true;
+      }
+      default:
+        return false;
+    }
   }
 }
