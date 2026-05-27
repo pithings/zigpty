@@ -224,18 +224,29 @@ const inspector = new OSCInspector((event) => {
       console.log("title:", decoded.title);
       break;
     case "cwd":
-      console.log("cwd:", decoded.path);
+      // Unified across OSC 7, ConEmu 9;9, and iTerm2 1337;CurrentDir=
+      console.log(`cwd (${decoded.source}):`, decoded.path);
       break;
     case "shellIntegration":
+      // OSC 133/633 — command is A/B/C/D (or vscode-specific tokens)
       console.log(`${decoded.vendor}/${decoded.command}`, decoded.data);
       break;
     case "notification":
       console.log("notify:", decoded.title, decoded.body);
       break;
     case "progress":
-      console.log(`progress: ${decoded.value}%`);
+      // ConEmu/Windows Terminal taskbar progress (OSC 9;4)
+      console.log(`progress: state=${decoded.state} value=${decoded.value}`);
       break;
-    // ...attention, hyperlink, clipboard, unknown
+    case "mark":
+      // OSC 1337 SetMark / OSC 9;12 ConEmu prompt-start mark
+      console.log("prompt mark from", decoded.vendor);
+      break;
+    case "hyperlink":
+      console.log(decoded.action, decoded.uri); // "open"|"close"
+      break;
+    // ...attention, clipboard, userVar, remoteHost,
+    // shellIntegrationVersion, unknown
   }
 });
 
@@ -245,19 +256,19 @@ pty.attach(inspector); // OSCInspector implements IPtyConsumer
 
 **Decoded shapes** (`DecodedOSC` union) cover the common codes out of the box:
 
-| Code            | `kind`                        | Notes                                                |
-| --------------- | ----------------------------- | ---------------------------------------------------- |
-| `0` / `1` / `2` | `title`                       | Window / tab / icon title                            |
-| `7`             | `cwd`                         | `file://host/path` — current working directory       |
-| `8`             | `hyperlink`                   | Anchor / close — `id`, `uri`, and `params`           |
-| `9`             | `progress` or `notification`  | ConEmu/Windows-Terminal progress, iTerm notification |
-| `52`            | `clipboard`                   | Selection set or query (`?`)                         |
-| `99`            | `notification`                | Kitty desktop notification (title/body/`done: true`) |
-| `133`           | `shellIntegration`            | FinalTerm shell integration marks (A/B/C/D)          |
-| `633`           | `shellIntegration`            | VS Code shell integration                            |
-| `777`           | `attention` or `notification` | rxvt urgency / notify                                |
-| `1337`          | `attention` or `notification` | iTerm2 RequestAttention / notify                     |
-| _other_         | `unknown`                     | Raw `{code, payload}` preserved                      |
+| Code            | `kind`(s)                                                                                         | Notes                                                                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0` / `1` / `2` | `title`                                                                                           | Window / tab / icon title. C0 control bytes stripped.                                                                                                    |
+| `7`             | `cwd` (`source: "osc7"`)                                                                          | `<scheme>://<host>/<path>`. Path is percent-decoded; `host`/`scheme`/`local` exposed.                                                                    |
+| `8`             | `hyperlink`                                                                                       | `action: "open" \| "close"`; `id`, `uri`, and `params`. Empty URI = close.                                                                               |
+| `9`             | `progress` / `cwd` / `mark` / `notification`                                                      | `9;4;…` progress, `9;9;…` ConEmu/WT CWD report, `9;12` prompt mark, `9;<text>` iTerm2 Growl-style notification.                                          |
+| `52`            | `clipboard`                                                                                       | Set, query (`?`), or `clear` (Pd not base64). Multi-char `Pc` exposed via `selections[]`.                                                                |
+| `99`            | `notification` (`vendor: "kitty"`)                                                                | Title / body / phase (`close`, `alive`, `icon`, …); honors `i=` (id), `u=` (urgency), `d=0` (partial chunk), `e=1` (base64 payload).                     |
+| `133`           | `shellIntegration` (`vendor: "vt"`)                                                               | FinalTerm A/B/C/D. `D` parses exit code + `err=`; `A`/`C` parse kitty extras into `params`.                                                              |
+| `633`           | `shellIntegration` (`vendor: "vscode"`)                                                           | A/B/C/D/E/P/EnvSingleStart/EnvSingleEntry/EnvSingleEnd. Applies VSCode `\\`/`\xNN` unescaping.                                                           |
+| `777`           | `notification` (`vendor: "rxvt"`)                                                                 | `notify;<title>;<body>` from the urxvt-perl extension.                                                                                                   |
+| `1337`          | `attention` / `cwd` / `mark` / `userVar` / `remoteHost` / `clipboard` / `shellIntegrationVersion` | iTerm2: `RequestAttention` (`yes`/`no`/`once`/`fireworks`), `CurrentDir=`, `SetMark`, `SetUserVar=`, `RemoteHost=`, `Copy=`, `ShellIntegrationVersion=`. |
+| _other_         | `unknown`                                                                                         | Raw `{code, payload}` preserved.                                                                                                                         |
 
 **Adding custom decoders** — use `createOSCDecoder()` to register handlers for new codes (or override built-ins). The returned function is typed as `DecodedOSC | <your custom kinds>`:
 
