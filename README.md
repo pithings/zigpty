@@ -108,6 +108,7 @@ interface IPty {
   close(): void;
   waitFor(pattern: string, options?: { timeout?: number }): Promise<string>;
   stats(): IPtyStats | null; // OS-level snapshot (cwd, memory, CPU time)
+  attach(consumer: IPtyConsumer): IDisposable; // Wire a sink to the data stream
 }
 ```
 
@@ -179,6 +180,106 @@ await pty.exited;
 ```
 
 Options: `{ timeout?: number }` — default 30 seconds. Throws if the pattern is not found within the timeout.
+
+### `pty.attach(consumer)`
+
+Wire a generic sink to the PTY's data stream. Anything with a `feed(data)` method conforms to `IPtyConsumer` — including the built-in `OSCInspector`, a file logger, an in-memory recorder, a WebSocket forwarder, etc. The consumer is auto-detached when the PTY exits.
+
+```ts
+interface IPtyConsumer {
+  feed(data: string | Buffer): void;
+  onAttach?(pty: IPty): void; // optional — fires once before the first feed
+  onDetach?(pty: IPty): void; // optional — fires on dispose or PTY exit
+}
+```
+
+```ts
+const recorder = {
+  chunks: [] as Buffer[],
+  feed(data) {
+    this.chunks.push(typeof data === "string" ? Buffer.from(data) : data);
+  },
+};
+
+const sub = pty.attach(recorder);
+// ...
+sub.dispose(); // detach early; otherwise auto-detached on PTY exit
+```
+
+Multiple consumers per PTY are supported and run independently.
+
+### OSC inspector — `zigpty/osc`
+
+Parse OSC (Operating System Command) escape sequences out of any byte stream — title changes, CWD updates, shell-integration marks (OSC 133/633), progress, notifications, and more. The inspector is a pure-TS byte-fed state machine; sequences split across chunks are stitched back together.
+
+```ts
+import { spawn } from "zigpty";
+import { OSCInspector, decodeOSC } from "zigpty/osc";
+
+const inspector = new OSCInspector((event) => {
+  // event = { code: number, payload: string }
+  const decoded = decodeOSC(event);
+  switch (decoded.kind) {
+    case "title":
+      console.log("title:", decoded.title);
+      break;
+    case "cwd":
+      console.log("cwd:", decoded.path);
+      break;
+    case "shellIntegration":
+      console.log(`${decoded.vendor}/${decoded.command}`, decoded.data);
+      break;
+    case "notification":
+      console.log("notify:", decoded.title, decoded.body);
+      break;
+    case "progress":
+      console.log(`progress: ${decoded.value}%`);
+      break;
+    // ...attention, tabColor, unknown
+  }
+});
+
+const pty = spawn("/bin/bash");
+pty.attach(inspector); // OSCInspector implements IPtyConsumer
+```
+
+**Decoded shapes** (`DecodedOSC` union) cover the common codes out of the box:
+
+| Code            | `kind`                        | Notes                                                |
+| --------------- | ----------------------------- | ---------------------------------------------------- |
+| `0` / `1` / `2` | `title`                       | Window / tab / icon title                            |
+| `6`             | `tabColor`                    | Konsole tab color                                    |
+| `7`             | `cwd`                         | `file://host/path` — current working directory       |
+| `9`             | `progress` or `notification`  | ConEmu/Windows-Terminal progress, iTerm notification |
+| `99`            | `notification`                | Kitty desktop notification (title/body/done)         |
+| `133`           | `shellIntegration`            | FinalTerm shell integration marks (A/B/C/D)          |
+| `633`           | `shellIntegration`            | VS Code shell integration                            |
+| `777`           | `attention` or `notification` | rxvt urgency / notify                                |
+| `1337`          | `attention` or `notification` | iTerm2 RequestAttention / notify                     |
+| _other_         | `unknown`                     | Raw `{code, payload}` preserved                      |
+
+**Adding custom decoders** — use `createOSCDecoder()` to register handlers for new codes (or override built-ins). The returned function is typed as `DecodedOSC | <your custom kinds>`:
+
+```ts
+import { createOSCDecoder } from "zigpty/osc";
+
+const decode = createOSCDecoder({
+  // OSC 52 — clipboard
+  52: (payload) => {
+    const [sel, data] = payload.split(";");
+    return { kind: "clipboard" as const, selection: sel, data };
+  },
+  // OSC 1338 — your custom vendor code
+  1338: (payload) => ({ kind: "vendor-x" as const, raw: payload }),
+});
+
+const inspector = new OSCInspector((event) => {
+  const d = decode(event);
+  // d: DecodedOSC | { kind: "clipboard"; ... } | { kind: "vendor-x"; ... }
+});
+```
+
+The built-in registry is exposed as `builtinOSCDecoders: Record<number, OSCDecoderFn<DecodedOSC>>` if you want to inspect or reuse individual decoders.
 
 ### `hasNative`
 

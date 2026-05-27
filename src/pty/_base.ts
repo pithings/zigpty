@@ -1,4 +1,4 @@
-import type { IDisposable, IEvent, IPty, IPtyOptions, IPtyStats } from "./types.ts";
+import type { IDisposable, IEvent, IPty, IPtyConsumer, IPtyOptions, IPtyStats } from "./types.ts";
 import { Terminal } from "../terminal.ts";
 import type { TerminalOptions } from "../terminal.ts";
 
@@ -68,6 +68,35 @@ export abstract class BasePty implements IPty {
         },
       };
     };
+  }
+
+  attach(consumer: IPtyConsumer): IDisposable {
+    consumer.onAttach?.(this);
+
+    const dataSub = this.onData((data) => {
+      try {
+        consumer.feed(data);
+      } catch {
+        // Swallow consumer errors — never let one break the pty data path.
+      }
+    });
+
+    let detached = false;
+    const detach = () => {
+      if (detached) return;
+      detached = true;
+      dataSub.dispose();
+      exitSub.dispose();
+      try {
+        consumer.onDetach?.(this);
+      } catch {
+        // Swallow consumer errors during teardown.
+      }
+    };
+
+    const exitSub = this.onExit(detach);
+
+    return { dispose: detach };
   }
 
   waitFor(pattern: string, options?: { timeout?: number }): Promise<string> {
