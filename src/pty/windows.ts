@@ -94,7 +94,10 @@ export class WindowsPty extends BasePty {
     if (this._closed) return;
     this.cols = cols;
     this.rows = rows;
-    const doResize = () => this._native.resize(this._handle, cols, rows);
+    const doResize = () => {
+      this._native.resize(this._handle, cols, rows);
+      this._notifyResize(cols, rows);
+    };
     if (this._ready) {
       doResize();
     } else {

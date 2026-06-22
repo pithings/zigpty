@@ -23,6 +23,9 @@ type EscState = 0 | 1 | 2 | 3 | 4;
  *   `activeThreshold` (significant bytes per burst) and never enter active.
  * - **ANSI/CSI/OSC sequences**: only printable content counts toward the
  *   threshold, so heavy color/escape output doesn't masquerade as text.
+ * - **Resize / redraw repaints**: bytes arriving within `redrawGraceMs` of a
+ *   PTY resize (auto) or an explicit {@link suppress} call (e.g. before
+ *   sending `^L`) are absorbed — a full-screen repaint isn't fresh output.
  *
  * @example
  * ```ts
@@ -40,15 +43,18 @@ export class IdleDetector implements IPtyConsumer {
   private _lastSigTime: number;
   private _idleTimer: ReturnType<typeof setTimeout> | null = null;
   private _escState: EscState = Ground;
+  private _suppressUntil = 0;
   private _listeners: IdleListener[] = [];
   private readonly _quietMs: number;
   private readonly _activeThreshold: number;
   private readonly _graceMs: number;
+  private readonly _redrawGraceMs: number;
 
   constructor(listener?: IdleListener, options: IdleDetectorOptions = {}) {
     this._quietMs = options.quietMs ?? 750;
     this._activeThreshold = options.activeThreshold ?? 512;
     this._graceMs = options.graceMs ?? 1500;
+    this._redrawGraceMs = options.redrawGraceMs ?? 500;
     const now = Date.now();
     this._stateStart = now;
     this._attachAt = now;
@@ -82,6 +88,26 @@ export class IdleDetector implements IPtyConsumer {
     this.dispose();
   }
 
+  /**
+   * Auto-called by `pty.attach()` wiring whenever the PTY is resized. Opens a
+   * suppression window so the TUI's full-screen repaint isn't counted as a
+   * fresh activity burst.
+   */
+  onResize(_cols: number, _rows: number): void {
+    this.suppress();
+  }
+
+  /**
+   * Open a suppression window of `durationMs` (default `redrawGraceMs`).
+   * Significant bytes arriving within it are absorbed silently — they never
+   * push the detector into `active`, nor keep an active burst alive. Call this
+   * right before sending an explicit redraw (e.g. `^L`) so the repaint that
+   * follows isn't mistaken for new output. Resize triggers it automatically.
+   */
+  suppress(durationMs: number = this._redrawGraceMs): void {
+    this._suppressUntil = Date.now() + durationMs;
+  }
+
   /** Feed bytes into the detector. Accepts string (utf-8), Buffer, or Uint8Array. */
   feed(data: string | Buffer | Uint8Array): void {
     const buf =
@@ -94,6 +120,13 @@ export class IdleDetector implements IPtyConsumer {
     if (sig === 0) return;
 
     const now = Date.now();
+
+    // Inside a resize/redraw suppression window — absorb the repaint without
+    // counting it toward a burst (idle) or keeping one alive (active).
+    if (now < this._suppressUntil) {
+      this._lastSigTime = now;
+      return;
+    }
 
     if (this._state === "idle") {
       // Within startup grace — silently absorb, never fire active.
@@ -134,6 +167,7 @@ export class IdleDetector implements IPtyConsumer {
     this._state = "idle";
     this._bytesPending = 0;
     this._escState = Ground;
+    this._suppressUntil = 0;
   }
 
   private _scheduleIdle(): void {

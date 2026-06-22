@@ -113,6 +113,7 @@ export class UnixPty extends BasePty {
     this.cols = cols;
     this.rows = rows;
     native.resize(this._fd, cols, rows, pixelSize?.width ?? 0, pixelSize?.height ?? 0);
+    this._notifyResize(cols, rows);
   }
 
   clear(): void {

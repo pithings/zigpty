@@ -23,6 +23,8 @@ export interface IPtyConsumer {
   onAttach?(pty: IPty): void;
   /** Optional: called once when detached (explicit dispose or PTY exit). */
   onDetach?(pty: IPty): void;
+  /** Optional: called after the PTY is resized, with the new dimensions. */
+  onResize?(cols: number, rows: number): void;
 }
 
 export interface IPtyChildStats {

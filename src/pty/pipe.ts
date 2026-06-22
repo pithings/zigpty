@@ -268,6 +268,7 @@ export class PipePty extends BasePty {
         process.kill(this.pid, "SIGWINCH");
       } catch {}
     }
+    this._notifyResize(cols, rows);
   }
 
   clear(): void {

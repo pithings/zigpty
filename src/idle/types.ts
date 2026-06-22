@@ -33,4 +33,12 @@ export interface IdleDetectorOptions {
    * shell-prompt / banner flood. Default `1500`.
    */
   graceMs?: number;
+  /**
+   * Suppression window (ms) opened by {@link IdleDetector.suppress} — and
+   * automatically on PTY resize — during which significant bytes are
+   * silently absorbed. Filters out the full-screen repaint a TUI emits
+   * after a resize or an explicit redraw (`^L`), which would otherwise look
+   * like a fresh burst of agent output. Default `500`.
+   */
+  redrawGraceMs?: number;
 }

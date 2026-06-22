@@ -210,6 +210,62 @@ describe("IdleDetector", () => {
     expect(events).toHaveLength(1);
   });
 
+  it("suppress() absorbs the redraw burst without firing active", async () => {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
+      graceMs: 0,
+      activeThreshold: 16,
+      quietMs: 500,
+      redrawGraceMs: 300,
+    });
+    // A full-screen repaint right after an explicit redraw — suppressed.
+    det.suppress();
+    det.feed("x".repeat(1024));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(events).toEqual([]);
+
+    // Past the suppression window, real output counts again.
+    await vi.advanceTimersByTimeAsync(200);
+    det.feed("y".repeat(64));
+    expect(events.map((e) => e.type)).toEqual(["active"]);
+    det.dispose();
+  });
+
+  it("onResize suppresses the repaint that follows a resize", async () => {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
+      graceMs: 0,
+      activeThreshold: 16,
+      quietMs: 500,
+      redrawGraceMs: 300,
+    });
+    det.onResize(120, 40);
+    det.feed("repaint ".repeat(128)); // big burst — absorbed
+    await vi.advanceTimersByTimeAsync(400);
+    expect(events).toEqual([]);
+    det.dispose();
+  });
+
+  it("suppress() does not keep an active burst alive past quietMs", async () => {
+    const events: IdleEvent[] = [];
+    const det = new IdleDetector((e) => events.push(e), {
+      graceMs: 0,
+      activeThreshold: 16,
+      quietMs: 500,
+      redrawGraceMs: 1000,
+    });
+    det.feed("abcdefghijklmnop"); // → active
+    expect(events.map((e) => e.type)).toEqual(["active"]);
+
+    // Resize mid-stream: the repaint must not reschedule idle.
+    det.onResize(80, 24);
+    await vi.advanceTimersByTimeAsync(200);
+    det.feed("x".repeat(256));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(events.map((e) => e.type)).toEqual(["active", "idle"]);
+    det.dispose();
+  });
+
   it("onAttach resets the grace window from the attach time", async () => {
     const events: IdleEvent[] = [];
     const det = new IdleDetector((e) => events.push(e), {

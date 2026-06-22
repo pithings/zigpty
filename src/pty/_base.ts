@@ -13,6 +13,7 @@ export abstract class BasePty implements IPty {
 
   protected _dataListeners: Array<(data: string | Buffer) => void> = [];
   protected _exitListeners: Array<(info: { exitCode: number; signal: number }) => void> = [];
+  protected _resizeListeners: Array<(cols: number, rows: number) => void> = [];
   protected _closed = false;
   protected _exitCode: number | null = null;
   protected _resolveExited!: (code: number) => void;
@@ -81,6 +82,12 @@ export abstract class BasePty implements IPty {
       }
     };
 
+    let resizeListener: ((cols: number, rows: number) => void) | undefined;
+    if (consumer.onResize) {
+      resizeListener = consumer.onResize.bind(consumer);
+      this._resizeListeners.push(resizeListener);
+    }
+
     let dataSub: IDisposable | undefined;
     let terminalListener: ((data: string) => void) | undefined;
     if (this._terminal) {
@@ -98,6 +105,10 @@ export abstract class BasePty implements IPty {
       if (detached) return;
       detached = true;
       dataSub?.dispose();
+      if (resizeListener) {
+        const idx = this._resizeListeners.indexOf(resizeListener);
+        if (idx >= 0) this._resizeListeners.splice(idx, 1);
+      }
       if (terminalListener) {
         const listeners = this._terminal?._dataListeners;
         if (listeners) {
@@ -173,6 +184,17 @@ export abstract class BasePty implements IPty {
   async [Symbol.asyncDispose](): Promise<void> {
     this.close();
     await this._exited;
+  }
+
+  /** Notify attached consumers of a resize. Call from each platform's `resize`. */
+  protected _notifyResize(cols: number, rows: number): void {
+    for (const listener of this._resizeListeners) {
+      try {
+        listener(cols, rows);
+      } catch {
+        // Swallow consumer errors — never let one break the resize path.
+      }
+    }
   }
 
   protected _handleExit(info: { exitCode: number; signal: number }): void {
