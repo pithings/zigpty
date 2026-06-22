@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.1
+
+[compare changes](https://github.com/pithings/zigpty/compare/v0.2.0...v0.2.1)
+
+### 🚀 Enhancements
+
+- **idle:** Suppress resize/redraw repaints from activity bursts ([1711f61](https://github.com/pithings/zigpty/commit/1711f61))
+
+### ❤️ Contributors
+
+- Pooya Parsa ([@pi0](https://github.com/pi0))
+
 ## v0.2.0
 
 [compare changes](https://github.com/pithings/zigpty/compare/v0.1.6...v0.2.0)
