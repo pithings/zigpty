@@ -126,6 +126,8 @@ pub const Stats = struct {
 
 // Unix extern declarations and functions — only compiled on non-Windows
 pub const forkPty = if (!is_windows) forkPtyUnix else void;
+/// Fork with the child stopped before setup; the caller must send SIGCONT.
+pub const forkPtySuspended = if (!is_windows) forkPtySuspendedUnix else void;
 pub const openPty = if (!is_windows) openPtyUnix else void;
 pub const resize = if (!is_windows) resizeUnix else void;
 pub const getProcessName = if (!is_windows) getProcessNameUnix else void;
@@ -149,6 +151,14 @@ const unix = if (!is_windows) struct {
 } else struct {};
 
 fn forkPtyUnix(opts: ForkOptions) PtyError!ForkResult {
+    return forkPtyUnixImpl(opts, false);
+}
+
+fn forkPtySuspendedUnix(opts: ForkOptions) PtyError!ForkResult {
+    return forkPtyUnixImpl(opts, true);
+}
+
+fn forkPtyUnixImpl(opts: ForkOptions, start_suspended: bool) PtyError!ForkResult {
     var term: std.c.termios = std.mem.zeroes(std.c.termios);
     termconfig.configure(&term, opts.use_utf8);
 
@@ -176,6 +186,10 @@ fn forkPtyUnix(opts: ForkOptions) PtyError!ForkResult {
         _ = std.c.sigprocmask(std.c.SIG.SETMASK, @ptrCast(&sigset_old), null);
         platform.resetSignalHandlers();
 
+        if (start_suspended) {
+            std.posix.kill(0, .STOP) catch platform.rawExit(1);
+        }
+
         if (std.c.chdir(opts.cwd) != 0) {
             platform.rawExit(1);
         }
@@ -194,6 +208,16 @@ fn forkPtyUnix(opts: ForkOptions) PtyError!ForkResult {
     }
 
     _ = std.c.sigprocmask(std.c.SIG.SETMASK, @ptrCast(&sigset_old), null);
+
+    if (start_suspended) {
+        var status: c_int = 0;
+        while (true) {
+            const ret = unix.waitpid(pid, &status, @intCast(std.c.W.UNTRACED));
+            if (ret == pid) break;
+            if (ret == -1 and @as(std.posix.E, @enumFromInt(std.c._errno().*)) == .INTR) continue;
+            return PtyError.ForkPtyFailed;
+        }
+    }
 
     var result = ForkResult{
         .fd = @intCast(master_fd),

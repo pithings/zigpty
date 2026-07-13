@@ -39,22 +39,28 @@ pub fn exitCallJs(
     const data: *lib.ExitInfo = @ptrCast(@alignCast(raw_data orelse return));
     defer alloc.destroy(data);
 
-    var obj: napi.napi_value = undefined;
-    if (napi.napi_create_object(env, &obj) != .ok) return;
-
-    var exit_val: napi.napi_value = undefined;
-    if (napi.napi_create_int32(env, data.exit_code, &exit_val) != .ok) return;
-    if (napi.napi_set_named_property(env, obj, "exitCode", exit_val) != .ok) return;
-
-    var sig_val: napi.napi_value = undefined;
-    if (napi.napi_create_int32(env, data.signal_code, &sig_val) != .ok) return;
-    if (napi.napi_set_named_property(env, obj, "signal", sig_val) != .ok) return;
+    const obj = createExitInfo(env, data.*) orelse return;
 
     var undefined_val: napi.napi_value = undefined;
     if (napi.napi_get_undefined(env, &undefined_val) != .ok) return;
 
     var args = [_]napi.napi_value{obj};
     _ = napi.napi_call_function(env, undefined_val, js_callback, 1, &args, null);
+}
+
+pub fn createExitInfo(env: napi.napi_env, data: lib.ExitInfo) ?napi.napi_value {
+    var obj: napi.napi_value = undefined;
+    if (napi.napi_create_object(env, &obj) != .ok) return null;
+
+    var exit_val: napi.napi_value = undefined;
+    if (napi.napi_create_int32(env, data.exit_code, &exit_val) != .ok) return null;
+    if (napi.napi_set_named_property(env, obj, "exitCode", exit_val) != .ok) return null;
+
+    var sig_val: napi.napi_value = undefined;
+    if (napi.napi_create_int32(env, data.signal_code, &sig_val) != .ok) return null;
+    if (napi.napi_set_named_property(env, obj, "signal", sig_val) != .ok) return null;
+
+    return obj;
 }
 
 pub fn getStringAlloc(env: napi.napi_env, val: napi.napi_value, a: std.mem.Allocator) ![:0]const u8 {

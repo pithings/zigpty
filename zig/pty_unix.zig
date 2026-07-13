@@ -7,36 +7,100 @@ const pty = @import("pty.zig");
 
 const alloc = pty.alloc;
 
+const PtyEvent = union(enum) {
+    data: []u8,
+    exit: lib.ExitInfo,
+};
+
 const ExitContext = struct {
     tsfn: napi.napi_threadsafe_function,
     pid: lib.Pid,
+    fd: lib.Fd,
+    read_thread: std.Thread,
 };
 
-/// Background thread that waits for process exit.
-fn exitMonitorThread(ctx_ptr: *ExitContext) void {
-    defer {
-        _ = napi.napi_release_threadsafe_function(ctx_ptr.tsfn, .release);
-        alloc.destroy(ctx_ptr);
-    }
+fn eventCallJs(
+    env: napi.napi_env,
+    js_callback: napi.napi_value,
+    _: ?*anyopaque,
+    raw_data: ?*anyopaque,
+) callconv(.c) void {
+    const event: *PtyEvent = @ptrCast(@alignCast(raw_data orelse return));
+    defer alloc.destroy(event);
 
-    const info = lib.waitForExit(ctx_ptr.pid);
+    const value = switch (event.*) {
+        .data => |data| value: {
+            defer alloc.free(data);
+            var buffer: napi.napi_value = undefined;
+            if (napi.napi_create_buffer_copy(env, data.len, data.ptr, null, &buffer) != .ok) return;
+            break :value buffer;
+        },
+        .exit => |exit_info| pty.createExitInfo(env, exit_info) orelse return,
+    };
 
-    const exit_data = alloc.create(lib.ExitInfo) catch return;
-    exit_data.* = info;
+    var undefined_value: napi.napi_value = undefined;
+    if (napi.napi_get_undefined(env, &undefined_value) != .ok) return;
 
-    _ = napi.napi_call_threadsafe_function(
-        ctx_ptr.tsfn,
-        @ptrCast(exit_data),
-        .blocking,
-    );
+    var args = [_]napi.napi_value{value};
+    _ = napi.napi_call_function(env, undefined_value, js_callback, 1, &args, null);
 }
 
-/// fork(file, args, env, cwd, cols, rows, uid, gid, useUtf8, onExit) → { fd, pid, pty }
+fn readThread(ctx: *ExitContext) void {
+    while (true) {
+        var buffer: [4096]u8 = undefined;
+        const bytes_read = std.posix.read(ctx.fd, &buffer) catch break;
+        if (bytes_read == 0) break;
+
+        const data = alloc.dupe(u8, buffer[0..bytes_read]) catch break;
+        const event = alloc.create(PtyEvent) catch {
+            alloc.free(data);
+            break;
+        };
+        event.* = .{ .data = data };
+
+        if (napi.napi_call_threadsafe_function(ctx.tsfn, @ptrCast(event), .blocking) != .ok) {
+            alloc.free(data);
+            alloc.destroy(event);
+            break;
+        }
+    }
+}
+
+/// Background thread that waits for process exit.
+fn exitMonitorThread(ctx: *ExitContext) void {
+    defer {
+        _ = napi.napi_release_threadsafe_function(ctx.tsfn, .release);
+        alloc.destroy(ctx);
+    }
+
+    const info = lib.waitForExit(ctx.pid);
+    ctx.read_thread.join();
+
+    const event = alloc.create(PtyEvent) catch return;
+    event.* = .{ .exit = info };
+
+    if (napi.napi_call_threadsafe_function(
+        ctx.tsfn,
+        @ptrCast(event),
+        .blocking,
+    ) != .ok) {
+        alloc.destroy(event);
+    }
+}
+
+/// fork(file, args, env, cwd, cols, rows, uid, gid, useUtf8, onEvent) → { fd, pid, pty }
 pub fn fork(env: napi.napi_env, info: napi.napi_callback_info) callconv(.c) napi.napi_value {
     return forkImpl(env, info) catch return pty.returnUndef(env);
 }
 
 fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value {
+    var exit_monitor_started = false;
+    var child_pid: ?lib.Pid = null;
+    errdefer if (child_pid) |pid| {
+        std.posix.kill(pid, .KILL) catch {};
+        if (!exit_monitor_started) _ = lib.waitForExit(pid);
+    };
+
     var argc: usize = 10;
     var argv: [10]napi.napi_value = undefined;
     try napi.check(env, napi.napi_get_cb_info(env, info, &argc, &argv, null, null));
@@ -90,7 +154,7 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
     var use_utf8: bool = true;
     try napi.check(env, napi.napi_get_value_bool(env, argv[8], &use_utf8));
 
-    const result = lib.forkPty(.{
+    const result = lib.forkPtySuspended(.{
         .file = file.ptr,
         .argv = @ptrCast(exec_argv.ptr),
         .envp = @ptrCast(exec_envp.ptr),
@@ -104,9 +168,10 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         _ = napi.napi_throw_error(env, null, "forkpty failed");
         return error.NapiFailed;
     };
+    child_pid = result.pid;
 
     var resource_name: napi.napi_value = undefined;
-    try napi.check(env, napi.napi_create_string_utf8(env, "zigpty_exit", 11, &resource_name));
+    try napi.check(env, napi.napi_create_string_utf8(env, "zigpty_event", 12, &resource_name));
 
     var tsfn: napi.napi_threadsafe_function = undefined;
     try napi.check(env, napi.napi_create_threadsafe_function(
@@ -114,12 +179,12 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         argv[9],
         null,
         resource_name,
-        0,
+        64,
         1,
         null,
         null,
         null,
-        pty.exitCallJs,
+        eventCallJs,
         &tsfn,
     ));
 
@@ -128,14 +193,29 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         _ = napi.napi_throw_error(env, null, "failed to allocate exit context");
         return error.NapiFailed;
     };
-    ctx.* = .{ .tsfn = tsfn, .pid = result.pid };
+    ctx.* = .{
+        .tsfn = tsfn,
+        .pid = result.pid,
+        .fd = result.fd,
+        .read_thread = undefined,
+    };
+
+    ctx.read_thread = std.Thread.spawn(.{}, readThread, .{ctx}) catch {
+        _ = napi.napi_release_threadsafe_function(tsfn, .abort);
+        alloc.destroy(ctx);
+        _ = napi.napi_throw_error(env, null, "failed to spawn read thread");
+        return error.NapiFailed;
+    };
 
     _ = std.Thread.spawn(.{}, exitMonitorThread, .{ctx}) catch {
+        std.posix.kill(result.pid, .KILL) catch {};
+        ctx.read_thread.join();
         _ = napi.napi_release_threadsafe_function(tsfn, .abort);
         alloc.destroy(ctx);
         _ = napi.napi_throw_error(env, null, "failed to spawn exit monitor thread");
         return error.NapiFailed;
     };
+    exit_monitor_started = true;
 
     var js_result: napi.napi_value = undefined;
     try napi.check(env, napi.napi_create_object(env, &js_result));
@@ -147,6 +227,11 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
     if (name.len > 0) {
         try napi.setProp(env, js_result, "pty", try napi.createString(env, name));
     }
+
+    std.posix.kill(result.pid, .CONT) catch {
+        _ = napi.napi_throw_error(env, null, "failed to resume child process");
+        return error.NapiFailed;
+    };
 
     return js_result;
 }

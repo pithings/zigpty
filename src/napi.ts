@@ -31,7 +31,7 @@ export interface INativeUnix {
     uid: number,
     gid: number,
     useUtf8: boolean,
-    onExit: (info: { exitCode: number; signal: number }) => void,
+    onEvent: (event: Buffer | { exitCode: number; signal: number }) => void,
   ): { fd: number; pid: number; pty: string };
 
   open(cols: number, rows: number): { master: number; slave: number; pty: string };

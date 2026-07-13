@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
-import * as tty from "node:tty";
+import { StringDecoder } from "node:string_decoder";
 import { native as _native } from "../napi.ts";
 import type { INativeUnix } from "../napi.ts";
 
@@ -27,11 +27,14 @@ const UNIX_SANITIZE_KEYS = [
 export class UnixPty extends BasePty {
   private _fd: number;
   private _pty: string;
-  private _readable: tty.ReadStream | undefined;
   private _encoding: BufferEncoding | null;
+  private _decoder?: StringDecoder;
   private _flowControlPause: string;
   private _flowControlResume: string;
   private _wq: WriteQueue;
+  private _nativeExitInfo?: { exitCode: number; signal: number };
+  private _paused = false;
+  private _pausedData: Buffer[] = [];
 
   constructor(file: string, args: string[], options?: IPtyOptions) {
     const cols = options?.cols ?? DEFAULT_COLS;
@@ -46,43 +49,43 @@ export class UnixPty extends BasePty {
 
     const envObj = options?.env ?? process.env;
     const envPairs = buildEnvPairs(envObj, options?.name, UNIX_SANITIZE_KEYS);
+    this._encoding = encoding;
+    this._decoder = encoding ? new StringDecoder(encoding) : undefined;
+    this._flowControlPause = options?.flowControlPause ?? DEFAULT_FLOW_PAUSE;
+    this._flowControlResume = options?.flowControlResume ?? DEFAULT_FLOW_RESUME;
 
-    const result = native.fork(file, args, envPairs, cwd, cols, rows, uid, gid, useUtf8, (info) => {
-      this._handleExit(info);
-      try {
-        this._readable?.destroy();
-      } catch {}
-    });
+    const result = native.fork(
+      file,
+      args,
+      envPairs,
+      cwd,
+      cols,
+      rows,
+      uid,
+      gid,
+      useUtf8,
+      (event) => {
+        if (Buffer.isBuffer(event)) {
+          if (this._paused && !this._terminal) {
+            this._pausedData.push(event);
+          } else {
+            this._emitData(event);
+          }
+          return;
+        }
+
+        this._nativeExitInfo = event;
+        this._finishExit();
+      },
+    );
 
     this.pid = result.pid;
     this._fd = result.fd;
     this._pty = result.pty;
-    this._encoding = encoding;
-    this._flowControlPause = options?.flowControlPause ?? DEFAULT_FLOW_PAUSE;
-    this._flowControlResume = options?.flowControlResume ?? DEFAULT_FLOW_RESUME;
     this._wq = new WriteQueue(this._fd);
 
-    // When a Terminal is attached, it owns the ReadStream on this fd.
-    // Only create our own ReadStream when there's no terminal.
     if (this._terminal) {
       this._terminal._attachUnixFd(this._fd);
-      // Use a dummy ReadStream ref for pause/resume/destroy in exit handler
-      this._readable = undefined!;
-    } else {
-      // Create readable stream from master fd
-      this._readable = new tty.ReadStream(this._fd);
-      if (encoding) {
-        this._readable.setEncoding(encoding);
-      }
-      this._readable.on("data", (data: string | Buffer) => {
-        if (this.handleFlowControl && typeof data === "string") {
-          if (data === this._flowControlPause || data === this._flowControlResume) return;
-        }
-        for (const listener of this._dataListeners) {
-          listener(data);
-        }
-      });
-      this._readable.on("error", () => {});
     }
   }
 
@@ -129,31 +132,67 @@ export class UnixPty extends BasePty {
   }
 
   pause(): void {
-    this._readable?.pause();
+    if (!this._terminal) this._paused = true;
   }
 
   resume(): void {
-    this._readable?.resume();
+    if (this._terminal || !this._paused) return;
+    this._paused = false;
+    for (const data of this._pausedData) {
+      this._emitData(data);
+    }
+    this._pausedData.length = 0;
+    this._finishExit();
   }
 
   close(): void {
     if (this._closed) return;
+    this.resume();
     this._closed = true;
 
     this._wq.close();
 
     try {
-      this._readable?.destroy();
-    } catch {}
-
-    try {
-      fs.closeSync(this._fd);
-    } catch {}
-
-    try {
       process.kill(this.pid, 0);
       process.kill(this.pid, "SIGHUP");
     } catch {}
+  }
+
+  private _finishExit(): void {
+    if (!this._nativeExitInfo || this._pausedData.length > 0) return;
+
+    const info = this._nativeExitInfo;
+    this._nativeExitInfo = undefined;
+    const trailing = this._decoder?.end();
+    if (trailing) this._emitOutput(trailing);
+    this._wq.close();
+    try {
+      fs.closeSync(this._fd);
+    } catch {}
+    this._handleExit(info);
+  }
+
+  private _emitData(data: Buffer): void {
+    if (this._terminal && !this._terminal.closed) {
+      this._terminal._emitData(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    }
+
+    const output = this._decoder ? this._decoder.write(data) : data;
+    this._emitOutput(output);
+  }
+
+  private _emitOutput(output: string | Buffer): void {
+    if (output.length === 0) return;
+    if (
+      this.handleFlowControl &&
+      typeof output === "string" &&
+      (output === this._flowControlPause || output === this._flowControlResume)
+    ) {
+      return;
+    }
+    for (const listener of this._dataListeners) {
+      listener(output);
+    }
   }
 }
 

@@ -170,7 +170,7 @@ export class Terminal implements Disposable {
       } catch {}
     }
     this.stdin = fd;
-    this._setupUnixReader(fd);
+    this._wq = new WriteQueue(fd, () => this._onDrain?.(this));
   }
 
   /** @internal Attach a Windows ConPTY handle (called from WindowsTerminal). */

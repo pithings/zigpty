@@ -33,6 +33,40 @@ describe("spawn", () => {
     expect(output).toContain("hello zigpty");
   });
 
+  it("delivers concurrent fast-exit output before exited resolves", async () => {
+    const modes = ["onData", "terminal"] as const;
+    const results = await Promise.all(
+      Array.from({ length: 100 }, async (_, index) => {
+        const mode = modes[index % modes.length]!;
+        let output = "";
+        const pty = spawn(
+          process.execPath,
+          ["-e", 'process.stdout.write("FAST")'],
+          mode === "terminal"
+            ? {
+                terminal: {
+                  data(_terminal, data) {
+                    output += Buffer.from(data).toString();
+                  },
+                },
+              }
+            : undefined,
+        );
+
+        if (mode === "onData") {
+          pty.onData((data) => {
+            output += data;
+          });
+        }
+
+        await pty.exited;
+        return { mode, output };
+      }),
+    );
+
+    expect(results.filter(({ output }) => !output.includes("FAST"))).toEqual([]);
+  });
+
   // Regression for #4: the exit callback must keep the event loop alive on its
   // own. If the tsfn is unref'd, Node fires beforeExit and shuts down before
   // the exit-monitor thread can dispatch the callback. Bypasses the TS layer
