@@ -34,13 +34,15 @@ pub const winStats = if (is_windows) win_napi.stats else void;
 
 /// Called on the JS thread when the background thread reports process exit.
 pub fn exitCallJs(
-    env: napi.napi_env,
-    js_callback: napi.napi_value,
+    maybe_env: ?napi.napi_env,
+    maybe_js_callback: ?napi.napi_value,
     _: ?*anyopaque,
     raw_data: ?*anyopaque,
 ) callconv(.c) void {
     const data: *lib.ExitInfo = @ptrCast(@alignCast(raw_data orelse return));
     defer alloc.destroy(data);
+    const env = maybe_env orelse return;
+    const js_callback = maybe_js_callback orelse return;
 
     const obj = createExitInfo(env, data.*) orelse return;
 

@@ -206,6 +206,79 @@ describe("spawn", () => {
     expect(JSON.parse(stdout)).toEqual({ fds: 0, threads: 0 });
   });
 
+  it.skipIf(isWindows)(
+    "terminating a Worker cleans up its PTY child and native lifecycle",
+    async () => {
+      const moduleUrl = new URL("./index.ts", import.meta.url).href;
+      const script = `
+      const fs = require("node:fs");
+      const os = require("node:os");
+      const path = require("node:path");
+      const { Worker } = require("node:worker_threads");
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zigpty-worker-"));
+      const pidFile = path.join(directory, "child.pid");
+      let worker;
+      let childPid;
+      const readChildPid = () => {
+        if (childPid) return childPid;
+        try { return Number(fs.readFileSync(pidFile, "utf8")); }
+        catch { return undefined; }
+      };
+      const killChild = () => {
+        const pid = readChildPid();
+        if (!pid) return;
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      };
+      const guard = setTimeout(() => {
+        killChild();
+        process.stderr.write("Worker teardown timed out");
+        process.exit(2);
+      }, 5000);
+
+      (async () => {
+        try {
+          worker = new Worker(
+            'const fs = require("node:fs");' +
+            'const { parentPort, workerData } = require("node:worker_threads");' +
+            '(async () => {' +
+            '  const { spawn } = await import(workerData.moduleUrl);' +
+            '  const pty = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);' +
+            '  fs.writeFileSync(workerData.pidFile, String(pty.pid));' +
+            '  parentPort.postMessage(pty.pid);' +
+            '})();',
+            {
+              eval: true,
+              execArgv: [],
+              workerData: { moduleUrl: ${JSON.stringify(moduleUrl)}, pidFile },
+            },
+          );
+          childPid = await new Promise((resolve, reject) => {
+            worker.once("message", resolve);
+            worker.once("error", reject);
+            worker.once("exit", (code) => {
+              if (code !== 0) reject(new Error("Worker exited before reporting its child"));
+            });
+          });
+          await worker.terminate();
+          let childAlive = true;
+          try { process.kill(childPid, 0); } catch { childAlive = false; }
+          if (childAlive) throw new Error("PTY child survived Worker termination");
+          clearTimeout(guard);
+          process.stdout.write("CLEAN");
+        } finally {
+          killChild();
+          fs.rmSync(directory, { recursive: true, force: true });
+        }
+      })().catch((error) => {
+        process.stderr.write(error.stack || String(error));
+        process.exitCode = 1;
+      });
+    `;
+      const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
+      expect(stdout).toBe("CLEAN");
+    },
+  );
+
   it("should fire onExit callback", async () => {
     const cmd = isWindows ? ["/c", "exit 42"] : ["-c", "exit 42"];
     const pty = spawn(shell, cmd);

@@ -11,6 +11,7 @@ const max_paused_bytes = 64 * 1024;
 const ExitEvent = struct {
     info: lib.ExitInfo,
     fd: lib.Fd,
+    ctx: *ExitContext,
 };
 
 const DataEvent = struct {
@@ -24,6 +25,7 @@ const PtyEvent = union(enum) {
 };
 
 const ExitContext = struct {
+    env: napi.napi_env,
     tsfn: napi.napi_threadsafe_function,
     pid: lib.Pid,
     fd: lib.Fd,
@@ -33,7 +35,11 @@ const ExitContext = struct {
     paused: bool = false,
     draining: bool = false,
     closing: bool = false,
+    env_closing: bool = false,
     finished: bool = false,
+    monitor_finished: bool = false,
+    cleanup_hook_registered: bool = false,
+    tsfn_released: bool = false,
     paused_data: ?[]u8 = null,
     paused_len: usize = 0,
     references: std.atomic.Value(u8) = std.atomic.Value(u8).init(1),
@@ -68,25 +74,94 @@ fn unlockContext(ctx: *ExitContext) void {
     std.debug.assert(std.c.pthread_mutex_unlock(&ctx.mutex) == .SUCCESS);
 }
 
+fn releaseTsfn(ctx: *ExitContext, mode: napi.napi_threadsafe_function_release_mode) void {
+    lockContext(ctx);
+    if (ctx.tsfn_released) {
+        unlockContext(ctx);
+        return;
+    }
+    ctx.tsfn_released = true;
+    unlockContext(ctx);
+    _ = napi.napi_release_threadsafe_function(ctx.tsfn, mode);
+}
+
+fn finishMonitor(ctx: *ExitContext) void {
+    releaseTsfn(ctx, .release);
+    lockContext(ctx);
+    ctx.monitor_finished = true;
+    _ = std.c.pthread_cond_broadcast(&ctx.condition);
+    unlockContext(ctx);
+    releaseContext(ctx);
+}
+
+fn removeCleanupHook(ctx: *ExitContext) void {
+    lockContext(ctx);
+    if (!ctx.cleanup_hook_registered or ctx.env_closing) {
+        unlockContext(ctx);
+        return;
+    }
+    ctx.cleanup_hook_registered = false;
+    unlockContext(ctx);
+
+    std.debug.assert(napi.napi_remove_env_cleanup_hook(
+        ctx.env,
+        environmentCleanup,
+        @ptrCast(ctx),
+    ) == .ok);
+    releaseContext(ctx);
+}
+
+fn environmentCleanup(raw_ctx: ?*anyopaque) callconv(.c) void {
+    const ctx: *ExitContext = @ptrCast(@alignCast(raw_ctx orelse return));
+
+    lockContext(ctx);
+    if (!ctx.cleanup_hook_registered) {
+        unlockContext(ctx);
+        return;
+    }
+    ctx.cleanup_hook_registered = false;
+    ctx.env_closing = true;
+    ctx.closing = true;
+    ctx.paused = false;
+    _ = std.c.pthread_cond_broadcast(&ctx.condition);
+    unlockContext(ctx);
+
+    releaseTsfn(ctx, .abort);
+    std.posix.kill(ctx.pid, .HUP) catch {};
+    std.posix.kill(ctx.pid, .KILL) catch {};
+
+    lockContext(ctx);
+    while (!ctx.monitor_finished) {
+        std.debug.assert(std.c.pthread_cond_wait(&ctx.condition, &ctx.mutex) == .SUCCESS);
+    }
+    unlockContext(ctx);
+    releaseContext(ctx);
+}
+
 fn destroyEvent(event: *PtyEvent) void {
     switch (event.*) {
         .data => |data_event| {
             alloc.free(data_event.data);
             releaseContext(data_event.ctx);
         },
-        .exit => |exit_event| _ = std.c.close(exit_event.fd),
+        .exit => |exit_event| {
+            _ = std.c.close(exit_event.fd);
+            releaseContext(exit_event.ctx);
+        },
     }
     alloc.destroy(event);
 }
 
 fn eventCallJs(
-    env: napi.napi_env,
-    js_callback: napi.napi_value,
+    maybe_env: ?napi.napi_env,
+    maybe_js_callback: ?napi.napi_value,
     _: ?*anyopaque,
     raw_data: ?*anyopaque,
 ) callconv(.c) void {
     const event: *PtyEvent = @ptrCast(@alignCast(raw_data orelse return));
     defer destroyEvent(event);
+    const env = maybe_env orelse return;
+    const js_callback = maybe_js_callback orelse return;
 
     const value = switch (event.*) {
         .data => |data_event| value: {
@@ -105,7 +180,10 @@ fn eventCallJs(
             ) != .ok) return;
             break :value buffer;
         },
-        .exit => |exit_event| pty.createExitInfo(env, exit_event.info) orelse return,
+        .exit => |exit_event| value: {
+            removeCleanupHook(exit_event.ctx);
+            break :value pty.createExitInfo(env, exit_event.info) orelse return;
+        },
     };
 
     var undefined_value: napi.napi_value = undefined;
@@ -223,10 +301,7 @@ fn closeContext(ctx: *ExitContext) void {
 
 /// Background thread that waits for process exit.
 fn exitMonitorThread(ctx: *ExitContext) void {
-    defer {
-        _ = napi.napi_release_threadsafe_function(ctx.tsfn, .release);
-        releaseContext(ctx);
-    }
+    defer finishMonitor(ctx);
 
     const info = lib.waitForExit(ctx.pid);
     lockContext(ctx);
@@ -243,13 +318,20 @@ fn exitMonitorThread(ctx: *ExitContext) void {
         ctx.paused_data = null;
         ctx.paused_len = 0;
     }
+    const env_closing = ctx.env_closing;
     unlockContext(ctx);
+
+    if (env_closing) {
+        _ = std.c.close(ctx.fd);
+        return;
+    }
 
     const event = alloc.create(PtyEvent) catch {
         _ = std.c.close(ctx.fd);
         return;
     };
-    event.* = .{ .exit = .{ .info = info, .fd = ctx.fd } };
+    retainContext(ctx);
+    event.* = .{ .exit = .{ .info = info, .fd = ctx.fd, .ctx = ctx } };
 
     if (napi.napi_call_threadsafe_function(
         ctx.tsfn,
@@ -403,6 +485,7 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         return error.NapiFailed;
     };
     ctx.* = .{
+        .env = env,
         .tsfn = tsfn,
         .pid = result.pid,
         .fd = result.fd,
@@ -426,6 +509,18 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
     };
     exit_monitor_started = true;
     exit_thread.detach();
+
+    retainContext(ctx);
+    const cleanup_status = napi.napi_add_env_cleanup_hook(env, environmentCleanup, @ptrCast(ctx));
+    if (cleanup_status != .ok) {
+        releaseContext(ctx);
+        try napi.check(env, cleanup_status);
+    }
+    lockContext(ctx);
+    ctx.cleanup_hook_registered = true;
+    unlockContext(ctx);
+    var cleanup_hook_transferred = false;
+    errdefer if (!cleanup_hook_transferred) removeCleanupHook(ctx);
 
     var js_result: napi.napi_value = undefined;
     try napi.check(env, napi.napi_create_object(env, &js_result));
@@ -452,6 +547,7 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         return error.NapiFailed;
     };
 
+    cleanup_hook_transferred = true;
     return js_result;
 }
 

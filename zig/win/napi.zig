@@ -27,8 +27,8 @@ const DataChunk = struct {
 
 /// Called on the JS thread when the read thread has data.
 fn dataCallJs(
-    env: napi.napi_env,
-    js_callback: napi.napi_value,
+    maybe_env: ?napi.napi_env,
+    maybe_js_callback: ?napi.napi_value,
     _: ?*anyopaque,
     raw_data: ?*anyopaque,
 ) callconv(.c) void {
@@ -37,6 +37,8 @@ fn dataCallJs(
         alloc.free(chunk.ptr[0..chunk.len]);
         alloc.destroy(chunk);
     }
+    const env = maybe_env orelse return;
+    const js_callback = maybe_js_callback orelse return;
 
     // Create a Node.js Buffer from the data
     var js_buf: napi.napi_value = undefined;
