@@ -18,6 +18,7 @@ fn init(env: napi.napi_env, exports: napi.napi_value) callconv(.c) napi.napi_val
         registerFn(env, exports, "fork", pty.fork);
         registerFn(env, exports, "pause", pty.pause);
         registerFn(env, exports, "resume", pty.resumeOutput);
+        registerFn(env, exports, "close", pty.close);
         registerFn(env, exports, "open", pty.open);
         registerFn(env, exports, "resize", pty.resize);
         registerFn(env, exports, "process", pty.getProcess);

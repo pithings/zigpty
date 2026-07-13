@@ -1,31 +1,21 @@
 /// Unix NAPI exports for zigpty (Linux + macOS).
 /// Bridges Node-API ↔ pure Zig PTY library for fork, open, resize, process.
 const std = @import("std");
-const builtin = @import("builtin");
 const napi = @import("napi.zig");
 const lib = @import("lib.zig");
 const pty = @import("pty.zig");
 
 const alloc = pty.alloc;
+const max_paused_bytes = 64 * 1024;
 
-const unix = struct {
-    extern fn tcflow(fd: c_int, action: c_int) c_int;
-
-    const output_pause = switch (builtin.os.tag) {
-        .linux => 0,
-        .macos => 1,
-        else => unreachable,
-    };
-    const output_resume = switch (builtin.os.tag) {
-        .linux => 1,
-        .macos => 2,
-        else => unreachable,
-    };
+const ExitEvent = struct {
+    info: lib.ExitInfo,
+    fd: lib.Fd,
 };
 
 const PtyEvent = union(enum) {
     data: []u8,
-    exit: lib.ExitInfo,
+    exit: ExitEvent,
 };
 
 const ExitContext = struct {
@@ -33,7 +23,53 @@ const ExitContext = struct {
     pid: lib.Pid,
     fd: lib.Fd,
     read_thread: std.Thread,
+    mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+    condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER,
+    paused: bool = false,
+    draining: bool = false,
+    closing: bool = false,
+    finished: bool = false,
+    paused_data: ?[]u8 = null,
+    paused_len: usize = 0,
+    references: std.atomic.Value(u8) = std.atomic.Value(u8).init(1),
 };
+
+fn retainContext(ctx: *ExitContext) void {
+    _ = ctx.references.fetchAdd(1, .monotonic);
+}
+
+fn releaseContext(ctx: *ExitContext) void {
+    if (ctx.references.fetchSub(1, .acq_rel) != 1) return;
+    if (ctx.paused_data) |data| alloc.free(data);
+    _ = std.c.pthread_cond_destroy(&ctx.condition);
+    _ = std.c.pthread_mutex_destroy(&ctx.mutex);
+    alloc.destroy(ctx);
+}
+
+fn contextFinalizer(
+    _: napi.napi_env,
+    data: ?*anyopaque,
+    _: ?*anyopaque,
+) callconv(.c) void {
+    const ctx: *ExitContext = @ptrCast(@alignCast(data orelse return));
+    releaseContext(ctx);
+}
+
+fn lockContext(ctx: *ExitContext) void {
+    std.debug.assert(std.c.pthread_mutex_lock(&ctx.mutex) == .SUCCESS);
+}
+
+fn unlockContext(ctx: *ExitContext) void {
+    std.debug.assert(std.c.pthread_mutex_unlock(&ctx.mutex) == .SUCCESS);
+}
+
+fn destroyEvent(event: *PtyEvent) void {
+    switch (event.*) {
+        .data => |data| alloc.free(data),
+        .exit => |exit_event| _ = std.c.close(exit_event.fd),
+    }
+    alloc.destroy(event);
+}
 
 fn eventCallJs(
     env: napi.napi_env,
@@ -42,16 +78,15 @@ fn eventCallJs(
     raw_data: ?*anyopaque,
 ) callconv(.c) void {
     const event: *PtyEvent = @ptrCast(@alignCast(raw_data orelse return));
-    defer alloc.destroy(event);
+    defer destroyEvent(event);
 
     const value = switch (event.*) {
         .data => |data| value: {
-            defer alloc.free(data);
             var buffer: napi.napi_value = undefined;
             if (napi.napi_create_buffer_copy(env, data.len, data.ptr, null, &buffer) != .ok) return;
             break :value buffer;
         },
-        .exit => |exit_info| pty.createExitInfo(env, exit_info) orelse return,
+        .exit => |exit_event| pty.createExitInfo(env, exit_event.info) orelse return,
     };
 
     var undefined_value: napi.napi_value = undefined;
@@ -61,54 +96,147 @@ fn eventCallJs(
     _ = napi.napi_call_function(env, undefined_value, js_callback, 1, &args, null);
 }
 
+fn queueData(ctx: *ExitContext, data: []u8) bool {
+    const event = alloc.create(PtyEvent) catch {
+        alloc.free(data);
+        return false;
+    };
+    event.* = .{ .data = data };
+
+    if (napi.napi_call_threadsafe_function(ctx.tsfn, @ptrCast(event), .blocking) == .ok) {
+        return true;
+    }
+    destroyEvent(event);
+    return false;
+}
+
+fn queueDataCopy(ctx: *ExitContext, data: []const u8) bool {
+    return queueData(ctx, alloc.dupe(u8, data) catch return false);
+}
+
+fn flushPausedData(ctx: *ExitContext) bool {
+    lockContext(ctx);
+    if (ctx.closing or ctx.paused_len == 0) {
+        if (ctx.closing) ctx.paused_len = 0;
+        unlockContext(ctx);
+        return true;
+    }
+    const data = alloc.dupe(u8, ctx.paused_data.?[0..ctx.paused_len]) catch {
+        unlockContext(ctx);
+        return false;
+    };
+    ctx.paused_len = 0;
+    unlockContext(ctx);
+    return queueData(ctx, data);
+}
+
 fn readThread(ctx: *ExitContext) void {
+    defer _ = flushPausedData(ctx);
+
     while (true) {
+        lockContext(ctx);
+        const paused_capacity = if (ctx.paused_data) |data| data.len else 0;
+        while (ctx.paused and ctx.paused_len >= paused_capacity and !ctx.draining and !ctx.closing) {
+            std.debug.assert(std.c.pthread_cond_wait(&ctx.condition, &ctx.mutex) == .SUCCESS);
+        }
+        const closing = ctx.closing;
+        const should_flush = !ctx.paused and ctx.paused_len > 0;
+        const read_size = if (ctx.paused)
+            @min(4096, paused_capacity - ctx.paused_len)
+        else
+            4096;
+        unlockContext(ctx);
+        if (closing) break;
+        if (should_flush) {
+            if (!flushPausedData(ctx)) break;
+            continue;
+        }
+
         var buffer: [4096]u8 = undefined;
-        const bytes_read = std.posix.read(ctx.fd, &buffer) catch break;
+        const bytes_read = std.posix.read(ctx.fd, buffer[0..read_size]) catch break;
         if (bytes_read == 0) break;
 
-        const data = alloc.dupe(u8, buffer[0..bytes_read]) catch break;
-        const event = alloc.create(PtyEvent) catch {
-            alloc.free(data);
-            break;
-        };
-        event.* = .{ .data = data };
-
-        if (napi.napi_call_threadsafe_function(ctx.tsfn, @ptrCast(event), .blocking) != .ok) {
-            alloc.free(data);
-            alloc.destroy(event);
+        lockContext(ctx);
+        if (ctx.closing) {
+            unlockContext(ctx);
             break;
         }
+        if (ctx.paused and !ctx.draining) {
+            @memcpy(ctx.paused_data.?[ctx.paused_len..][0..bytes_read], buffer[0..bytes_read]);
+            ctx.paused_len += bytes_read;
+            unlockContext(ctx);
+            continue;
+        }
+        const should_flush_before_data = ctx.paused_len > 0;
+        unlockContext(ctx);
+
+        if (should_flush_before_data and !flushPausedData(ctx)) break;
+        if (!queueDataCopy(ctx, buffer[0..bytes_read])) break;
     }
 }
 
-fn setOutputPaused(fd: lib.Fd, paused: bool) void {
-    const action: c_int = if (paused) unix.output_pause else unix.output_resume;
-    while (unix.tcflow(fd, action) != 0) {
-        if (@as(std.posix.E, @enumFromInt(std.c._errno().*)) != .INTR) return;
+fn setPaused(ctx: *ExitContext, paused: bool) void {
+    lockContext(ctx);
+    defer unlockContext(ctx);
+    if (ctx.draining or ctx.closing or ctx.finished) return;
+    if (paused and ctx.paused_data == null) {
+        ctx.paused_data = alloc.alloc(u8, max_paused_bytes) catch null;
     }
+    ctx.paused = paused;
+    if (!paused) _ = std.c.pthread_cond_broadcast(&ctx.condition);
+}
+
+fn closeContext(ctx: *ExitContext) void {
+    lockContext(ctx);
+    if (ctx.closing or ctx.finished) {
+        unlockContext(ctx);
+        return;
+    }
+    ctx.closing = true;
+    ctx.paused = false;
+    _ = std.c.pthread_cond_broadcast(&ctx.condition);
+    unlockContext(ctx);
+
+    std.posix.kill(ctx.pid, .HUP) catch {};
+    std.posix.kill(ctx.pid, .KILL) catch {};
 }
 
 /// Background thread that waits for process exit.
 fn exitMonitorThread(ctx: *ExitContext) void {
     defer {
         _ = napi.napi_release_threadsafe_function(ctx.tsfn, .release);
-        alloc.destroy(ctx);
+        releaseContext(ctx);
     }
 
     const info = lib.waitForExit(ctx.pid);
-    setOutputPaused(ctx.fd, false);
+    lockContext(ctx);
+    ctx.draining = true;
+    ctx.paused = false;
+    _ = std.c.pthread_cond_broadcast(&ctx.condition);
+    unlockContext(ctx);
     ctx.read_thread.join();
 
-    const event = alloc.create(PtyEvent) catch return;
-    event.* = .{ .exit = info };
+    lockContext(ctx);
+    ctx.finished = true;
+    if (ctx.paused_data) |data| {
+        alloc.free(data);
+        ctx.paused_data = null;
+        ctx.paused_len = 0;
+    }
+    unlockContext(ctx);
+
+    const event = alloc.create(PtyEvent) catch {
+        _ = std.c.close(ctx.fd);
+        return;
+    };
+    event.* = .{ .exit = .{ .info = info, .fd = ctx.fd } };
 
     if (napi.napi_call_threadsafe_function(
         ctx.tsfn,
         @ptrCast(event),
         .blocking,
     ) != .ok) {
-        alloc.destroy(event);
+        destroyEvent(event);
     }
 }
 
@@ -127,14 +255,24 @@ pub fn resumeOutput(env: napi.napi_env, info: napi.napi_callback_info) callconv(
     return pty.returnUndef(env);
 }
 
+pub fn close(env: napi.napi_env, info: napi.napi_callback_info) callconv(.c) napi.napi_value {
+    const ctx = getContext(env, info) catch return pty.returnUndef(env);
+    closeContext(ctx);
+    return pty.returnUndef(env);
+}
+
 fn setPausedImpl(env: napi.napi_env, info: napi.napi_callback_info, paused: bool) !void {
+    setPaused(try getContext(env, info), paused);
+}
+
+fn getContext(env: napi.napi_env, info: napi.napi_callback_info) !*ExitContext {
     var argc: usize = 1;
     var argv: [1]napi.napi_value = undefined;
     try napi.check(env, napi.napi_get_cb_info(env, info, &argc, &argv, null, null));
 
-    var fd: i32 = -1;
-    try napi.check(env, napi.napi_get_value_int32(env, argv[0], &fd));
-    if (fd >= 0) setOutputPaused(fd, paused);
+    var ctx_ptr: ?*anyopaque = null;
+    try napi.check(env, napi.napi_get_value_external(env, argv[0], &ctx_ptr));
+    return @ptrCast(@alignCast(ctx_ptr orelse return error.NapiFailed));
 }
 
 fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value {
@@ -246,16 +384,16 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
 
     ctx.read_thread = std.Thread.spawn(.{}, readThread, .{ctx}) catch {
         _ = napi.napi_release_threadsafe_function(tsfn, .abort);
-        alloc.destroy(ctx);
+        releaseContext(ctx);
         _ = napi.napi_throw_error(env, null, "failed to spawn read thread");
         return error.NapiFailed;
     };
 
     _ = std.Thread.spawn(.{}, exitMonitorThread, .{ctx}) catch {
-        std.posix.kill(result.pid, .KILL) catch {};
+        closeContext(ctx);
         ctx.read_thread.join();
         _ = napi.napi_release_threadsafe_function(tsfn, .abort);
-        alloc.destroy(ctx);
+        releaseContext(ctx);
         _ = napi.napi_throw_error(env, null, "failed to spawn exit monitor thread");
         return error.NapiFailed;
     };
@@ -266,6 +404,15 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
 
     try napi.setProp(env, js_result, "fd", try napi.createI32(env, @intCast(result.fd)));
     try napi.setProp(env, js_result, "pid", try napi.createI32(env, result.pid));
+
+    var handle: napi.napi_value = undefined;
+    retainContext(ctx);
+    const handle_status = napi.napi_create_external(env, @ptrCast(ctx), contextFinalizer, null, &handle);
+    if (handle_status != .ok) {
+        releaseContext(ctx);
+        try napi.check(env, handle_status);
+    }
+    try napi.setProp(env, js_result, "handle", handle);
 
     const name = result.ptyName();
     if (name.len > 0) {

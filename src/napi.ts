@@ -32,11 +32,13 @@ export interface INativeUnix {
     gid: number,
     useUtf8: boolean,
     onEvent: (event: Buffer | { exitCode: number; signal: number }) => void,
-  ): { fd: number; pid: number; pty: string };
+  ): { fd: number; pid: number; pty: string; handle: object };
 
-  pause(fd: number): void;
+  pause(handle: object): void;
 
-  resume(fd: number): void;
+  resume(handle: object): void;
+
+  close(handle: object): void;
 
   open(cols: number, rows: number): { master: number; slave: number; pty: string };
 

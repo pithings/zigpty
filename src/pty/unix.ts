@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { native as _native } from "../napi.ts";
@@ -26,6 +25,7 @@ const UNIX_SANITIZE_KEYS = [
 
 export class UnixPty extends BasePty {
   private _fd: number;
+  private _handle: object;
   private _pty: string;
   private _encoding: BufferEncoding | null;
   private _decoder?: StringDecoder;
@@ -73,6 +73,7 @@ export class UnixPty extends BasePty {
 
     this.pid = result.pid;
     this._fd = result.fd;
+    this._handle = result.handle;
     this._pty = result.pty;
     this._wq = new WriteQueue(this._fd);
 
@@ -124,11 +125,11 @@ export class UnixPty extends BasePty {
   }
 
   pause(): void {
-    if (!this._closed) native.pause(this._fd);
+    if (!this._closed) native.pause(this._handle);
   }
 
   resume(): void {
-    if (!this._closed) native.resume(this._fd);
+    if (!this._closed) native.resume(this._handle);
   }
 
   close(): void {
@@ -136,21 +137,13 @@ export class UnixPty extends BasePty {
     this._closed = true;
 
     this._wq.close();
-    native.resume(this._fd);
-
-    try {
-      process.kill(this.pid, 0);
-      process.kill(this.pid, "SIGHUP");
-    } catch {}
+    native.close(this._handle);
   }
 
   private _finishExit(info: { exitCode: number; signal: number }): void {
     const trailing = this._decoder?.end();
     if (trailing && !this._closed) this._emitOutput(trailing);
     this._wq.close();
-    try {
-      fs.closeSync(this._fd);
-    } catch {}
     this._handleExit(info);
   }
 

@@ -84,14 +84,12 @@ describe("spawn", () => {
       let native;
       try { native = require(path.join(dir, base + ".node")); }
       catch { native = require(path.join(dir, base + "-musl.node")); }
-      const fs = require("node:fs");
       let output = "";
       const result = native.fork("/bin/sh", ["-c", "printf RAW"], [], process.cwd(), 80, 24, -1, -1, true, (event) => {
         if (Buffer.isBuffer(event)) {
           output += event;
           return;
         }
-        fs.closeSync(result.fd);
         process.stdout.write(output + "|EXITED:" + event.exitCode);
       });
     `;
@@ -447,29 +445,37 @@ describe("close", () => {
   it.each(["onData", "terminal"] as const)(
     "should suppress %s callbacks after close and release the fd",
     async (mode) => {
-      const directory = await fsPromises.mkdtemp(path.join(tmpdir(), "zigpty-close-"));
-      const marker = path.join(directory, "sighup-handled");
-      let output = "";
-      const pty = spawn(
+      let pty: ReturnType<typeof spawn>;
+      let closeTriggered = false;
+      let callbacksAfterClose = 0;
+      const onData = (data: string | Uint8Array) => {
+        const output = typeof data === "string" ? data : Buffer.from(data).toString();
+        if (!output.includes("x")) return;
+        if (closeTriggered) {
+          callbacksAfterClose += 1;
+          return;
+        }
+        closeTriggered = true;
+        pty.close();
+      };
+      pty = spawn(
         process.execPath,
         [
           "-e",
           `
             const fs = require("node:fs");
-            process.on("SIGHUP", () => {
-              fs.writeFileSync(${JSON.stringify(marker)}, "handled");
-              fs.writeSync(1, "AFTER_CLOSE");
+            process.stdout.write("READY");
+            process.stdin.once("data", () => {
+              fs.writeSync(1, "x".repeat(1_000_000));
               process.exit(0);
             });
-            process.stdout.write("READY");
-            setInterval(() => {}, 1000);
           `,
         ],
         mode === "terminal"
           ? {
               terminal: {
                 data(_terminal, data) {
-                  output += Buffer.from(data).toString();
+                  onData(data);
                 },
               },
             }
@@ -477,25 +483,48 @@ describe("close", () => {
       );
 
       if (mode === "onData") {
-        pty.onData((data) => {
-          output += data;
-        });
+        pty.onData(onData);
       }
 
-      try {
-        await pty.waitFor("READY");
-        const fd = (pty as unknown as { _fd: number })._fd;
-        pty.close();
-        await pty.exited;
+      await pty.waitFor("READY");
+      const fd = (pty as unknown as { _fd: number })._fd;
+      const pid = pty.pid;
+      pty.write("go\n");
+      await pty.exited;
 
-        expect(await fsPromises.readFile(marker, "utf8")).toBe("handled");
-        expect(output).not.toContain("AFTER_CLOSE");
-        expect(() => fs.fstatSync(fd)).toThrow();
-      } finally {
-        await fsPromises.rm(directory, { recursive: true, force: true });
-      }
+      expect(closeTriggered).toBe(true);
+      expect(callbacksAfterClose).toBe(0);
+      expect(() => process.kill(pid, 0)).toThrow();
+      expect(() => fs.fstatSync(fd)).toThrow();
     },
   );
+
+  it.skipIf(isWindows)("should dispose a child that ignores SIGHUP", async () => {
+    let fd = -1;
+    let pid = -1;
+    let exitInfo: { exitCode: number; signal: number } | undefined;
+
+    {
+      await using pty = spawn(process.execPath, [
+        "-e",
+        `
+          process.on("SIGHUP", () => {});
+          process.stdout.write("READY");
+          setInterval(() => {}, 1000);
+        `,
+      ]);
+      await pty.waitFor("READY");
+      fd = (pty as unknown as { _fd: number })._fd;
+      pid = pty.pid;
+      pty.onExit((info) => {
+        exitInfo = info;
+      });
+    }
+
+    expect(exitInfo).toEqual({ exitCode: 0, signal: 9 });
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(() => fs.fstatSync(fd)).toThrow();
+  });
 });
 
 describeUnix("flow control (unix)", () => {
@@ -628,6 +657,7 @@ describeUnix("pause/resume (unix)", () => {
   it("should apply backpressure to substantial output while paused", async () => {
     const directory = await fsPromises.mkdtemp(path.join(tmpdir(), "zigpty-pause-"));
     const marker = path.join(directory, "writing");
+    const doneMarker = path.join(directory, "done");
     let outputBytes = 0;
     const pty = spawn(
       process.execPath,
@@ -637,8 +667,10 @@ describeUnix("pause/resume (unix)", () => {
           const fs = require("node:fs");
           process.stdout.write("READY");
           process.stdin.once("data", () => {
+            fs.writeSync(1, "x".repeat(60_000));
             fs.writeFileSync(${JSON.stringify(marker)}, "writing");
-            fs.writeSync(1, "x".repeat(1_000_000));
+            fs.writeSync(1, "x".repeat(940_000));
+            fs.writeFileSync(${JSON.stringify(doneMarker)}, "done");
             process.exit(0);
           });
         `,
@@ -668,11 +700,13 @@ describeUnix("pause/resume (unix)", () => {
       }
 
       expect(pty.stats()).not.toBeNull();
-      expect(outputBytes).toBe(0);
+      expect(outputBytes).toBeLessThan(1_000_000);
+      await expect(fsPromises.readFile(doneMarker)).rejects.toMatchObject({ code: "ENOENT" });
 
       pty.resume();
       await pty.exited;
       expect(outputBytes).toBe(1_000_000);
+      await expect(fsPromises.readFile(doneMarker, "utf8")).resolves.toBe("done");
     } finally {
       pty.kill("SIGKILL");
       await pty.exited;

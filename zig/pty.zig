@@ -17,6 +17,7 @@ const win_napi = if (is_windows) @import("win/napi.zig") else struct {};
 pub const fork = if (!is_windows) unix_napi.fork else void;
 pub const pause = if (!is_windows) unix_napi.pause else void;
 pub const resumeOutput = if (!is_windows) unix_napi.resumeOutput else void;
+pub const close = if (!is_windows) unix_napi.close else void;
 pub const open = if (!is_windows) unix_napi.open else void;
 pub const resize = if (!is_windows) unix_napi.resize else void;
 pub const getProcess = if (!is_windows) unix_napi.getProcess else void;

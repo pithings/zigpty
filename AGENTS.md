@@ -23,7 +23,7 @@ zigpty/
 │   ├── root.zig            # NAPI module entry: exports platform-specific functions
 │   ├── napi.zig            # Raw NAPI bindings (~240 lines, extern declarations)
 │   ├── pty.zig             # NAPI shared helpers + platform dispatch (re-exports)
-│   ├── pty_unix.zig        # NAPI↔lib.zig bridge for Unix (fork, open, resize, process)
+│   ├── pty_unix.zig        # NAPI↔lib.zig bridge for Unix (lifecycle, I/O, process)
 │   ├── termios.zig         # Default terminal config (Linux + macOS)
 │   ├── pty_linux.zig       # Linux-specific: execvpe, ptsname_r, /proc, close_range
 │   ├── pty_darwin.zig      # macOS-specific: execvp+environ, sysctl, FD close loop
@@ -73,7 +73,7 @@ Terminal (standalone, src/terminal.ts) — Bun-compatible callbacks, AsyncDispos
 - `_handleExit(info)` — common exit callback (set closed, fire listeners, resolve promise)
 - `buildEnvPairs(env, termName?, sanitizeKeys?)` — shared env builder
 
-**UnixPty** adds: fd management, ordered native data/exit callbacks, async write queue with EAGAIN retry, kernel-backed pause/resume, flow control, `process` via native, signal-based `kill()`.
+**UnixPty** adds: fd management, ordered native data/exit callbacks, async write queue with EAGAIN retry, bounded native pause/resume, deterministic close, flow control, `process` via native, signal-based `kill()`.
 
 **WindowsPty** adds: ConPTY handle, deferred calls until ready, `napi_threadsafe_function` data/exit callbacks.
 
@@ -178,15 +178,16 @@ Types: `SpawnResult`, `ConPtySetup`, `ExitInfo`, `Stats`, `ChildStats`, `ConPtyE
 
 ### Unix Exports
 
-| Export    | Signature                                                                         | Implementation                                              |
-| --------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `fork`    | `(file, args[], env[], cwd, cols, rows, uid, gid, utf8, cb)` → `{fd, pid, pty}`   | `lib.forkPtySuspended()` + read/exit threads                |
-| `pause`   | `(fd)` → void                                                                     | `tcflow(TCOOFF)`                                            |
-| `resume`  | `(fd)` → void                                                                     | `tcflow(TCOON)`                                             |
-| `open`    | `(cols, rows)` → `{master, slave, pty}`                                           | `lib.openPty()`                                             |
-| `resize`  | `(fd, cols, rows)` → void                                                         | `lib.resize()`                                              |
-| `process` | `(fd)` → string                                                                   | `lib.getProcessName()`                                      |
-| `stats`   | `(pid)` → `{pid, cwd, rssBytes, cpuUser, cpuSys, count, children[]}` \| undefined | `lib.getStats()` (aggregates leader + ppid descendant tree) |
+| Export    | Signature                                                                               | Implementation                                              |
+| --------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `fork`    | `(file, args[], env[], cwd, cols, rows, uid, gid, utf8, cb)` → `{fd, pid, pty, handle}` | `lib.forkPtySuspended()` + read/exit threads                |
+| `pause`   | `(handle)` → void                                                                       | Pause native reader with bounded buffering                  |
+| `resume`  | `(handle)` → void                                                                       | Resume native reader and flush paused output                |
+| `close`   | `(handle)` → void                                                                       | Stop reader and force child termination                     |
+| `open`    | `(cols, rows)` → `{master, slave, pty}`                                                 | `lib.openPty()`                                             |
+| `resize`  | `(fd, cols, rows)` → void                                                               | `lib.resize()`                                              |
+| `process` | `(fd)` → string                                                                         | `lib.getProcessName()`                                      |
+| `stats`   | `(pid)` → `{pid, cwd, rssBytes, cpuUser, cpuSys, count, children[]}` \| undefined       | `lib.getStats()` (aggregates leader + ppid descendant tree) |
 
 ### Windows Exports
 
@@ -271,7 +272,8 @@ Name field caveats: Unix comm (`/proc/<pid>/stat` on Linux, `pbsi_comm` on macOS
 - **NAPI import lib via dlltool** (Windows): `win/node_api.def` lists NAPI symbols imported from `node.exe`. Build generates import `.lib` at build time via `zig dlltool` — no checked-in binaries.
 - **ConPTY flush on exit** (Windows): `ClosePseudoConsole` must be called after process exit to flush remaining output. Input pipe is closed first, then pseudo console, while read thread drains output concurrently to avoid deadlock.
 - **Ordered Unix output lifecycle**: The child starts suspended while a native read thread begins draining the PTY. Data and exit share one bounded `napi_threadsafe_function` queue, so the exit callback cannot overtake output delivery.
-- **Kernel-backed Unix pause/resume**: `tcflow(TCOOFF/TCOON)` leaves paused output in the PTY instead of buffering it in JavaScript. Exit and close force output flow on before reader cleanup, so lifecycle completion never waits for a later `resume()` call.
+- **Bounded Unix pause/resume**: The native reader buffers at most 64 KiB while paused, then waits on a condition so the PTY applies backpressure without unbounded JavaScript memory. Resume and natural exit flush buffered output in order.
+- **Deterministic Unix close**: Close marks the native reader as closing, suppresses later JavaScript data callbacks, force-terminates the child, joins the reader on the exit thread, and closes the master fd after the JavaScript exit callback returns.
 - **Async `fs.write`** with EAGAIN retry for writing on Unix (non-blocking write queue with `setImmediate` backoff).
 - **Android errno shim** (`zig/errno_shim.c`): Android's Bionic libc uses `__errno()` instead of musl's `__errno_location()`. All musl builds link a tiny C shim with weak symbols — `__errno_location` (weak defined) forwards to `__errno` (weak undefined). On musl Linux, musl's strong `__errno_location` overrides the shim. On Android/Bionic, the shim activates and `__errno` resolves from Bionic's libc. No separate Android binary needed.
 - **Platform-aware native loading**: `napi.ts` resolves `zigpty.<os>-<arch>.node` with glibc→musl fallback on Linux. On Android (`platform() === "android"`), maps to `linux` and loads the musl binary.
