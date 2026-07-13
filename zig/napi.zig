@@ -37,7 +37,8 @@ pub const napi_status = enum(c_int) {
 
 pub const napi_callback = *const fn (napi_env, napi_callback_info) callconv(.c) napi_value;
 pub const napi_finalize = ?*const fn (napi_env, ?*anyopaque, ?*anyopaque) callconv(.c) void;
-pub const napi_threadsafe_function_call_js = ?*const fn (napi_env, napi_value, ?*anyopaque, ?*anyopaque) callconv(.c) void;
+pub const napi_cleanup_hook = *const fn (?*anyopaque) callconv(.c) void;
+pub const napi_threadsafe_function_call_js = ?*const fn (?napi_env, ?napi_value, ?*anyopaque, ?*anyopaque) callconv(.c) void;
 
 pub const napi_threadsafe_function_release_mode = enum(c_int) {
     release = 0,
@@ -151,6 +152,20 @@ pub extern fn napi_release_threadsafe_function(
 ) napi_status;
 
 pub extern fn napi_unref_threadsafe_function(env: napi_env, func: napi_threadsafe_function) napi_status;
+
+// --- Environment cleanup ---
+
+pub extern fn napi_add_env_cleanup_hook(
+    env: napi_env,
+    fun: napi_cleanup_hook,
+    arg: ?*anyopaque,
+) napi_status;
+
+pub extern fn napi_remove_env_cleanup_hook(
+    env: napi_env,
+    fun: napi_cleanup_hook,
+    arg: ?*anyopaque,
+) napi_status;
 
 // --- External values ---
 

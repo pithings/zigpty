@@ -31,8 +31,20 @@ export interface INativeUnix {
     uid: number,
     gid: number,
     useUtf8: boolean,
-    onExit: (info: { exitCode: number; signal: number }) => void,
-  ): { fd: number; pid: number; pty: string };
+    onEvent: (event: Buffer | { exitCode: number; signal: number }) => void,
+  ): {
+    /** Caller-owned PTY fd. The native lifecycle reads and closes a separate duplicate. */
+    fd: number;
+    pid: number;
+    pty: string;
+    handle: object;
+  };
+
+  pause(handle: object): void;
+
+  resume(handle: object): void;
+
+  close(handle: object): void;
 
   open(cols: number, rows: number): { master: number; slave: number; pty: string };
 

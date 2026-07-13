@@ -83,7 +83,6 @@ echo "--- Runtime test (arm64 Docker) ---"
 
 read -r -d '' TEST_SCRIPT << 'JSEOF' || true
 const fs = require("node:fs");
-const tty = require("node:tty");
 
 const prebuild = "/app/prebuilds/zigpty.linux-arm64-musl.node";
 
@@ -104,23 +103,30 @@ try {
   console.log("  open(): SKIP (%s)", e.message);
 }
 
-// Test 2: fork + exit
+// Test 2: fork + ordered data/exit callback
+let output = "";
 const result = native.fork(
   "/bin/sh", ["-c", "echo hello-zigpty-android && exit 0"],
   Object.entries(process.env).map(([k, v]) => k + "=" + v),
   "/tmp", 80, 24, -1, -1, true,
-  (info) => {
-    console.log("  exit: code=%d signal=%d", info.exitCode, info.signal);
+  (event) => {
+    if (Buffer.isBuffer(event)) {
+      output += event.toString();
+      process.stdout.write("  output: " + event);
+      return;
+    }
+
+    console.log("  exit: code=%d signal=%d", event.exitCode, event.signal);
+    fs.closeSync(result.fd);
+    if (!output.includes("hello-zigpty-android") || event.exitCode !== 0) {
+      console.log("  FAIL: missing output or non-zero exit");
+      process.exit(1);
+    }
     console.log("  PASS");
     process.exit(0);
   }
 );
 console.log("  fork(): pid=%d fd=%d", result.pid, result.fd);
-
-const stream = new tty.ReadStream(result.fd);
-stream.setEncoding("utf8");
-stream.on("data", (data) => process.stdout.write("  output: " + data));
-stream.on("error", () => {});
 setTimeout(() => { console.log("  FAIL: timeout"); process.exit(1); }, 10000);
 JSEOF
 

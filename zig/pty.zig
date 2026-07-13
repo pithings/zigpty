@@ -15,6 +15,9 @@ const win_napi = if (is_windows) @import("win/napi.zig") else struct {};
 
 // Unix re-exports
 pub const fork = if (!is_windows) unix_napi.fork else void;
+pub const pause = if (!is_windows) unix_napi.pause else void;
+pub const resumeOutput = if (!is_windows) unix_napi.resumeOutput else void;
+pub const close = if (!is_windows) unix_napi.close else void;
 pub const open = if (!is_windows) unix_napi.open else void;
 pub const resize = if (!is_windows) unix_napi.resize else void;
 pub const getProcess = if (!is_windows) unix_napi.getProcess else void;
@@ -31,30 +34,38 @@ pub const winStats = if (is_windows) win_napi.stats else void;
 
 /// Called on the JS thread when the background thread reports process exit.
 pub fn exitCallJs(
-    env: napi.napi_env,
-    js_callback: napi.napi_value,
+    maybe_env: ?napi.napi_env,
+    maybe_js_callback: ?napi.napi_value,
     _: ?*anyopaque,
     raw_data: ?*anyopaque,
 ) callconv(.c) void {
     const data: *lib.ExitInfo = @ptrCast(@alignCast(raw_data orelse return));
     defer alloc.destroy(data);
+    const env = maybe_env orelse return;
+    const js_callback = maybe_js_callback orelse return;
 
-    var obj: napi.napi_value = undefined;
-    if (napi.napi_create_object(env, &obj) != .ok) return;
-
-    var exit_val: napi.napi_value = undefined;
-    if (napi.napi_create_int32(env, data.exit_code, &exit_val) != .ok) return;
-    if (napi.napi_set_named_property(env, obj, "exitCode", exit_val) != .ok) return;
-
-    var sig_val: napi.napi_value = undefined;
-    if (napi.napi_create_int32(env, data.signal_code, &sig_val) != .ok) return;
-    if (napi.napi_set_named_property(env, obj, "signal", sig_val) != .ok) return;
+    const obj = createExitInfo(env, data.*) orelse return;
 
     var undefined_val: napi.napi_value = undefined;
     if (napi.napi_get_undefined(env, &undefined_val) != .ok) return;
 
     var args = [_]napi.napi_value{obj};
     _ = napi.napi_call_function(env, undefined_val, js_callback, 1, &args, null);
+}
+
+pub fn createExitInfo(env: napi.napi_env, data: lib.ExitInfo) ?napi.napi_value {
+    var obj: napi.napi_value = undefined;
+    if (napi.napi_create_object(env, &obj) != .ok) return null;
+
+    var exit_val: napi.napi_value = undefined;
+    if (napi.napi_create_int32(env, data.exit_code, &exit_val) != .ok) return null;
+    if (napi.napi_set_named_property(env, obj, "exitCode", exit_val) != .ok) return null;
+
+    var sig_val: napi.napi_value = undefined;
+    if (napi.napi_create_int32(env, data.signal_code, &sig_val) != .ok) return null;
+    if (napi.napi_set_named_property(env, obj, "signal", sig_val) != .ok) return null;
+
+    return obj;
 }
 
 pub fn getStringAlloc(env: napi.napi_env, val: napi.napi_value, a: std.mem.Allocator) ![:0]const u8 {

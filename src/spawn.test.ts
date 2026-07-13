@@ -1,11 +1,15 @@
 import { execFile } from "node:child_process";
-import { platform } from "node:os";
+import * as fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
+import { platform, tmpdir } from "node:os";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { open, spawn } from "./index.ts";
 
 const execFileP = promisify(execFile);
+const nodeExecutable = "bun" in process.versions ? "node" : process.execPath;
 
 const isWindows = platform() === "win32";
 const shell = isWindows ? "cmd.exe" : "/bin/sh";
@@ -33,27 +37,384 @@ describe("spawn", () => {
     expect(output).toContain("hello zigpty");
   });
 
+  it("delivers concurrent fast-exit output before exited resolves", async () => {
+    const modes = ["onData", "terminal"] as const;
+    const results = await Promise.all(
+      Array.from({ length: 100 }, async (_, index) => {
+        const mode = modes[index % modes.length]!;
+        let output = "";
+        const pty = spawn(
+          process.execPath,
+          ["-e", 'process.stdout.write("FAST")'],
+          mode === "terminal"
+            ? {
+                terminal: {
+                  data(_terminal, data) {
+                    output += Buffer.from(data).toString();
+                  },
+                },
+              }
+            : undefined,
+        );
+
+        if (mode === "onData") {
+          pty.onData((data) => {
+            output += data;
+          });
+        }
+
+        await pty.exited;
+        return { mode, output };
+      }),
+    );
+
+    expect(results.filter(({ output }) => !output.includes("FAST"))).toEqual([]);
+  });
+
   // Regression for #4: the exit callback must keep the event loop alive on its
   // own. If the tsfn is unref'd, Node fires beforeExit and shuts down before
   // the exit-monitor thread can dispatch the callback. Bypasses the TS layer
   // and drives the native binding directly so the test doesn't depend on
   // dist/ or a TS loader being available in the subprocess.
-  it.skipIf(isWindows)("exit callback keeps event loop alive (issue #4)", async () => {
+  it.skipIf(isWindows)("native callback delivers output before exit and stays alive", async () => {
     const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
     const script = `
+      const fs = require("node:fs");
       const path = require("node:path");
       const dir = ${JSON.stringify(prebuildsDir)};
       const base = "zigpty." + process.platform + "-" + process.arch;
       let native;
       try { native = require(path.join(dir, base + ".node")); }
       catch { native = require(path.join(dir, base + "-musl.node")); }
-      native.fork("true", [], [], process.cwd(), 80, 24, -1, -1, true, (info) => {
-        process.stdout.write("EXITED:" + info.exitCode);
+      let output = "";
+      const result = native.fork("/bin/sh", ["-c", "printf RAW"], [], process.cwd(), 80, 24, -1, -1, true, (event) => {
+        if (Buffer.isBuffer(event)) {
+          output += event;
+          return;
+        }
+        fs.closeSync(result.fd);
+        process.stdout.write(output + "|EXITED:" + event.exitCode);
       });
     `;
-    const { stdout } = await execFileP(process.execPath, ["-e", script], { timeout: 10_000 });
-    expect(stdout).toBe("EXITED:0");
+    const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
+    expect(stdout).toBe("RAW|EXITED:0");
   });
+
+  it.skipIf(isWindows)("native exit cleanup cannot close a recycled public fd", async () => {
+    const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
+    const script = `
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const dir = ${JSON.stringify(prebuildsDir)};
+      const base = "zigpty." + process.platform + "-" + process.arch;
+      let native;
+      try { native = require(path.join(dir, base + ".node")); }
+      catch { native = require(path.join(dir, base + "-musl.node")); }
+      let result;
+      result = native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, (event) => {
+        if (Buffer.isBuffer(event)) return;
+        fs.closeSync(result.fd);
+        const replacement = fs.openSync("/dev/null", "r");
+        const reused = replacement === result.fd;
+        setImmediate(() => {
+          let valid = true;
+          try { fs.fstatSync(replacement); } catch { valid = false; }
+          if (valid) fs.closeSync(replacement);
+          process.stdout.write(JSON.stringify({ reused, valid }));
+        });
+      });
+    `;
+    const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
+    expect(JSON.parse(stdout)).toEqual({ reused: true, valid: true });
+  });
+
+  it.skipIf(isWindows)("native close drops queued data callbacks", async () => {
+    const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
+    const script = `
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const dir = ${JSON.stringify(prebuildsDir)};
+      const base = "zigpty." + process.platform + "-" + process.arch;
+      let native;
+      try { native = require(path.join(dir, base + ".node")); }
+      catch { native = require(path.join(dir, base + "-musl.node")); }
+      let result;
+      let closed = false;
+      let callbacksAfterClose = 0;
+      result = native.fork(
+        process.execPath,
+        ["-e", 'require("node:fs").writeSync(1, "x".repeat(1_000_000)); setInterval(() => {}, 1000)'],
+        Object.entries(process.env).map(([key, value]) => key + "=" + value),
+        process.cwd(), 80, 24, -1, -1, true,
+        (event) => {
+          if (Buffer.isBuffer(event)) {
+            if (!closed) {
+              closed = true;
+              native.close(result.handle);
+            } else {
+              callbacksAfterClose += 1;
+            }
+            return;
+          }
+          fs.closeSync(result.fd);
+          process.stdout.write(String(callbacksAfterClose));
+        },
+      );
+    `;
+    const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
+    expect(stdout).toBe("0");
+  });
+
+  it.skipIf(isWindows)("native fork failures close the master fd", async () => {
+    const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
+    const script = `
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const tty = require("node:tty");
+      const dir = ${JSON.stringify(prebuildsDir)};
+      const base = "zigpty." + process.platform + "-" + process.arch;
+      let native;
+      try { native = require(path.join(dir, base + ".node")); }
+      catch { native = require(path.join(dir, base + "-musl.node")); }
+      const fdDirectory = process.platform === "darwin" ? "/dev/fd" : "/proc/self/fd";
+      const countPtys = () => fs.readdirSync(fdDirectory)
+        .filter((fd) => tty.isatty(Number(fd))).length;
+      try {
+        native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, {});
+      } catch {}
+      const before = countPtys();
+      let throws = 0;
+      for (let index = 0; index < 20; index += 1) {
+        try {
+          native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, {});
+        } catch {
+          throws += 1;
+        }
+      }
+      process.stdout.write(JSON.stringify({ leaked: countPtys() - before, throws }));
+    `;
+    const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
+    expect(JSON.parse(stdout)).toEqual({ leaked: 0, throws: 20 });
+  });
+
+  it.skipIf(isWindows)("completed native PTYs release fds and active threads", async () => {
+    const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
+    const script = `
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const { execFileSync } = require("node:child_process");
+      const dir = ${JSON.stringify(prebuildsDir)};
+      const base = "zigpty." + process.platform + "-" + process.arch;
+      let native;
+      try { native = require(path.join(dir, base + ".node")); }
+      catch { native = require(path.join(dir, base + "-musl.node")); }
+      const fdDirectory = process.platform === "darwin" ? "/dev/fd" : "/proc/self/fd";
+      const threadCount = () => {
+        if (process.platform === "linux") {
+          return Number(fs.readFileSync("/proc/self/status", "utf8").match(/^Threads:\\s+(\\d+)$/m)[1]);
+        }
+        return execFileSync("ps", ["-M", "-p", String(process.pid)], { encoding: "utf8" })
+          .trim().split("\\n").length - 1;
+      };
+      const before = { fds: fs.readdirSync(fdDirectory).length, threads: threadCount() };
+      const run = () => new Promise((resolve) => {
+        const result = native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, (event) => {
+          if (!Buffer.isBuffer(event)) {
+            fs.closeSync(result.fd);
+            void result.handle;
+            resolve();
+          }
+        });
+      });
+      (async () => {
+        for (let index = 0; index < 100; index += 1) await run();
+        global.gc();
+        const after = { fds: fs.readdirSync(fdDirectory).length, threads: threadCount() };
+        process.stdout.write(JSON.stringify({
+          fds: after.fds - before.fds,
+          threads: after.threads - before.threads,
+        }));
+      })();
+    `;
+    const { stdout } = await execFileP(nodeExecutable, ["--expose-gc", "-e", script], {
+      timeout: 20_000,
+    });
+    expect(JSON.parse(stdout)).toEqual({ fds: 0, threads: 0 });
+  });
+
+  it.skipIf(isWindows)(
+    "terminating a Worker cleans up its PTY child and native lifecycle",
+    async () => {
+      const moduleUrl = new URL("./index.ts", import.meta.url).href;
+      const script = `
+      const fs = require("node:fs");
+      const os = require("node:os");
+      const path = require("node:path");
+      const { Worker } = require("node:worker_threads");
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zigpty-worker-"));
+      const pidFile = path.join(directory, "child.pid");
+      let worker;
+      let childPid;
+      let replacement;
+      const readChildPid = () => {
+        if (childPid) return childPid;
+        try { return Number(fs.readFileSync(pidFile, "utf8")); }
+        catch { return undefined; }
+      };
+      const killChild = () => {
+        const pid = readChildPid();
+        if (!pid) return;
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      };
+      const guard = setTimeout(() => {
+        killChild();
+        process.stderr.write("Worker teardown timed out");
+        process.exit(2);
+      }, 5000);
+
+      (async () => {
+        try {
+          worker = new Worker(
+            'const fs = require("node:fs");' +
+            'const { parentPort, workerData } = require("node:worker_threads");' +
+            '(async () => {' +
+            '  const { spawn } = await import(workerData.moduleUrl);' +
+            '  const pty = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);' +
+            '  const fd = pty._fd;' +
+            '  fs.closeSync(fd);' +
+            '  fs.writeFileSync(workerData.pidFile, String(pty.pid));' +
+            '  parentPort.postMessage({ pid: pty.pid, fd });' +
+            '})();',
+            {
+              eval: true,
+              execArgv: [],
+              workerData: { moduleUrl: ${JSON.stringify(moduleUrl)}, pidFile },
+            },
+          );
+          const child = await new Promise((resolve, reject) => {
+            worker.once("message", resolve);
+            worker.once("error", reject);
+            worker.once("exit", (code) => {
+              if (code !== 0) reject(new Error("Worker exited before reporting its child"));
+            });
+          });
+          childPid = child.pid;
+          replacement = fs.openSync("/dev/null", "r");
+          if (replacement !== child.fd) throw new Error("Worker PTY fd was not reused");
+          await worker.terminate();
+          fs.fstatSync(replacement);
+          let childAlive = true;
+          try { process.kill(childPid, 0); } catch { childAlive = false; }
+          if (childAlive) throw new Error("PTY child survived Worker termination");
+          clearTimeout(guard);
+          process.stdout.write("CLEAN");
+        } finally {
+          killChild();
+          if (replacement !== undefined) {
+            try { fs.closeSync(replacement); } catch {}
+          }
+          fs.rmSync(directory, { recursive: true, force: true });
+        }
+      })().catch((error) => {
+        process.stderr.write(error.stack || String(error));
+        process.exitCode = 1;
+      });
+    `;
+      const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
+      expect(stdout).toBe("CLEAN");
+    },
+  );
+
+  it.skipIf(isWindows)(
+    "Worker cleanup after child reap finishes without stale signaling",
+    async () => {
+      const moduleUrl = new URL("./index.ts", import.meta.url).href;
+      const script = `
+      const fs = require("node:fs");
+      const os = require("node:os");
+      const path = require("node:path");
+      const { Worker } = require("node:worker_threads");
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zigpty-worker-reaped-"));
+      const pidFile = path.join(directory, "child.pid");
+      let childPid;
+      let publicFd;
+      const killChild = () => {
+        if (!childPid) {
+          try { childPid = Number(fs.readFileSync(pidFile, "utf8")); } catch {}
+        }
+        if (childPid) {
+          try { process.kill(childPid, "SIGKILL"); } catch {}
+        }
+      };
+      const guard = setTimeout(() => {
+        killChild();
+        process.stderr.write("Reaped Worker teardown timed out");
+        process.exit(2);
+      }, 5000);
+
+      (async () => {
+        try {
+          const worker = new Worker(
+            'const fs = require("node:fs");' +
+            'const { parentPort, workerData } = require("node:worker_threads");' +
+            '(async () => {' +
+            '  const { spawn } = await import(workerData.moduleUrl);' +
+            '  const pty = spawn(process.execPath, ["-e", workerData.childScript]);' +
+            '  const stat = fs.fstatSync(pty._fd);' +
+            '  fs.writeFileSync(workerData.pidFile, String(pty.pid));' +
+            '  parentPort.postMessage({' +
+            '    pid: pty.pid, fd: pty._fd,' +
+            '    identity: [stat.dev, stat.ino, stat.rdev, stat.mode],' +
+            '  });' +
+            '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);' +
+            '})();',
+            {
+              eval: true,
+              execArgv: [],
+              workerData: {
+                moduleUrl: ${JSON.stringify(moduleUrl)},
+                pidFile,
+                childScript: 'require("node:fs").writeSync(1, "x".repeat(4_000))',
+              },
+            },
+          );
+          const child = await new Promise((resolve, reject) => {
+            worker.once("message", resolve);
+            worker.once("error", reject);
+          });
+          childPid = child.pid;
+          publicFd = child.fd;
+          while (true) {
+            try {
+              process.kill(childPid, 0);
+              await new Promise(setImmediate);
+            } catch {
+              break;
+            }
+          }
+          await worker.terminate();
+          let samePty = false;
+          try {
+            const stat = fs.fstatSync(publicFd);
+            samePty = [stat.dev, stat.ino, stat.rdev, stat.mode]
+              .every((value, index) => value === child.identity[index]);
+          } catch {}
+          if (samePty) throw new Error("Worker PTY fd survived environment cleanup");
+          clearTimeout(guard);
+          process.stdout.write("CLEAN");
+        } finally {
+          killChild();
+          fs.rmSync(directory, { recursive: true, force: true });
+        }
+      })().catch((error) => {
+        process.stderr.write(error.stack || String(error));
+        process.exitCode = 1;
+      });
+    `;
+      const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
+      expect(stdout).toBe("CLEAN");
+    },
+  );
 
   it("should fire onExit callback", async () => {
     const cmd = isWindows ? ["/c", "exit 42"] : ["-c", "exit 42"];
@@ -399,6 +760,214 @@ describe("close", () => {
     // Process should have been killed
     expect(exitInfo.exitCode).not.toBe(-999);
   });
+
+  it.each(["onData", "terminal"] as const)(
+    "should suppress %s callbacks after close and release the fd",
+    async (mode) => {
+      let pty: ReturnType<typeof spawn>;
+      let closeTriggered = false;
+      let callbacksAfterClose = 0;
+      const onData = (data: string | Uint8Array) => {
+        const output = typeof data === "string" ? data : Buffer.from(data).toString();
+        if (!output.includes("x")) return;
+        if (closeTriggered) {
+          callbacksAfterClose += 1;
+          return;
+        }
+        closeTriggered = true;
+        pty.close();
+      };
+      pty = spawn(
+        process.execPath,
+        [
+          "-e",
+          `
+            const fs = require("node:fs");
+            process.stdout.write("READY");
+            process.stdin.once("data", () => {
+              fs.writeSync(1, "x".repeat(1_000_000));
+              process.exit(0);
+            });
+          `,
+        ],
+        mode === "terminal"
+          ? {
+              terminal: {
+                data(_terminal, data) {
+                  onData(data);
+                },
+              },
+            }
+          : undefined,
+      );
+
+      if (mode === "onData") {
+        pty.onData(onData);
+      }
+
+      await pty.waitFor("READY");
+      const fd = (pty as unknown as { _fd: number })._fd;
+      const pid = pty.pid;
+      pty.write("go\n");
+      await pty.exited;
+
+      expect(closeTriggered).toBe(true);
+      expect(callbacksAfterClose).toBe(0);
+      expect(() => process.kill(pid, 0)).toThrow();
+      expect(() => fs.fstatSync(fd)).toThrow();
+    },
+  );
+
+  it.skipIf(isWindows)("should dispose a child that ignores SIGHUP", async () => {
+    let fd = -1;
+    let pid = -1;
+    let exitInfo: { exitCode: number; signal: number } | undefined;
+
+    {
+      await using pty = spawn(process.execPath, [
+        "-e",
+        `
+          process.on("SIGHUP", () => {});
+          process.stdout.write("READY");
+          setInterval(() => {}, 1000);
+        `,
+      ]);
+      await pty.waitFor("READY");
+      fd = (pty as unknown as { _fd: number })._fd;
+      pid = pty.pid;
+      pty.onExit((info) => {
+        exitInfo = info;
+      });
+    }
+
+    expect(exitInfo).toEqual({ exitCode: 0, signal: 9 });
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(() => fs.fstatSync(fd)).toThrow();
+  });
+
+  it.skipIf(isWindows)("should stop public data callbacks when terminal data closes", async () => {
+    let pty: ReturnType<typeof spawn>;
+    let publicCallbacks = 0;
+    pty = spawn(
+      process.execPath,
+      ["-e", 'process.stdout.write("CLOSE"); setInterval(() => {}, 1000)'],
+      {
+        terminal: {
+          data(_terminal, data) {
+            if (Buffer.from(data).includes(0x43)) pty.close();
+          },
+        },
+      },
+    );
+    pty.onData((data) => {
+      if (Buffer.from(data).includes(0x43)) publicCallbacks += 1;
+    });
+
+    await pty.exited;
+    expect(publicCallbacks).toBe(0);
+  });
+
+  it.skipIf(isWindows)(
+    "should terminate inheriting descendants when the leader exits first",
+    async () => {
+      const childScript = `
+      process.on("SIGHUP", () => {});
+      process.send("ready");
+      process.disconnect();
+      setInterval(() => {}, 1000);
+    `;
+      const leaderScript = `
+      const { spawn } = require("node:child_process");
+      const child = spawn(process.execPath, ["-e", ${JSON.stringify(childScript)}], {
+        stdio: ["inherit", "inherit", "inherit", "ipc"],
+      });
+      child.on("message", () => {
+        process.stdout.write("DESC:" + child.pid + "\\n");
+        child.unref();
+      });
+    `;
+      const pty = spawn(process.execPath, ["-e", leaderScript]);
+      let descendant = -1;
+
+      try {
+        const output = await pty.waitFor("\n");
+        descendant = Number(output.match(/DESC:(\d+)/)?.[1]);
+        expect(descendant).toBeGreaterThan(0);
+
+        while (true) {
+          try {
+            process.kill(pty.pid, 0);
+            await setImmediate();
+          } catch {
+            break;
+          }
+        }
+        pty.close();
+        await pty.exited;
+        while (true) {
+          try {
+            process.kill(descendant, 0);
+            await setImmediate();
+          } catch {
+            break;
+          }
+        }
+        expect(() => process.kill(descendant, 0)).toThrow();
+      } finally {
+        pty.close();
+        if (descendant > 0) {
+          try {
+            process.kill(descendant, "SIGKILL");
+          } catch {}
+        }
+        await pty.exited;
+      }
+    },
+  );
+
+  it.skipIf(isWindows)(
+    "should release the PTY while leaving detached descendants outside its group",
+    async () => {
+      const leaderScript = `
+      const { spawn } = require("node:child_process");
+      const child = spawn(
+        process.execPath,
+        ["-e", 'process.on("SIGHUP", () => {}); setInterval(() => {}, 1000)'],
+        { detached: true, stdio: "inherit" },
+      );
+      process.stdout.write("DESC:" + child.pid + "\\n");
+      setInterval(() => {}, 1000);
+    `;
+      const pty = spawn(process.execPath, ["-e", leaderScript]);
+      let descendant = -1;
+
+      try {
+        const output = await pty.waitFor("\n");
+        descendant = Number(output.match(/DESC:(\d+)/)?.[1]);
+        expect(descendant).toBeGreaterThan(0);
+
+        pty.close();
+        await pty.exited;
+        expect(() => process.kill(descendant, 0)).not.toThrow();
+      } finally {
+        pty.close();
+        if (descendant > 0) {
+          try {
+            process.kill(descendant, "SIGKILL");
+          } catch {}
+          while (true) {
+            try {
+              process.kill(descendant, 0);
+              await setImmediate();
+            } catch {
+              break;
+            }
+          }
+        }
+        await pty.exited;
+      }
+    },
+  );
 });
 
 describeUnix("flow control (unix)", () => {
@@ -526,6 +1095,95 @@ describeUnix("pause/resume (unix)", () => {
     pty.resume();
 
     pty.kill("SIGTERM");
+  });
+
+  it("should apply backpressure to substantial output while paused", async () => {
+    const directory = await fsPromises.mkdtemp(path.join(tmpdir(), "zigpty-pause-"));
+    const marker = path.join(directory, "writing");
+    const doneMarker = path.join(directory, "done");
+    let outputBytes = 0;
+    const pty = spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+          const fs = require("node:fs");
+          process.stdout.write("READY");
+          process.stdin.once("data", () => {
+            fs.writeSync(1, "x".repeat(60_000));
+            fs.writeFileSync(${JSON.stringify(marker)}, "writing");
+            fs.writeSync(1, "x".repeat(940_000));
+            fs.writeFileSync(${JSON.stringify(doneMarker)}, "done");
+            process.exit(0);
+          });
+        `,
+      ],
+      { encoding: null },
+    );
+    pty.onData((data) => {
+      const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      for (const byte of buffer) {
+        if (byte === 0x78) outputBytes += 1;
+      }
+    });
+
+    try {
+      await pty.waitFor("READY");
+      pty.pause();
+      pty.write("go\n");
+
+      while (true) {
+        try {
+          await fsPromises.readFile(marker);
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await setImmediate();
+        }
+      }
+
+      expect(pty.stats()).not.toBeNull();
+      expect(outputBytes).toBeLessThan(1_000_000);
+      await expect(fsPromises.readFile(doneMarker)).rejects.toMatchObject({ code: "ENOENT" });
+
+      pty.resume();
+      await pty.exited;
+      expect(outputBytes).toBe(1_000_000);
+      await expect(fsPromises.readFile(doneMarker, "utf8")).resolves.toBe("done");
+    } finally {
+      pty.kill("SIGKILL");
+      await pty.exited;
+      await fsPromises.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("should deliver remaining output and exit while paused", async () => {
+    let output = "";
+    const pty = spawn(process.execPath, [
+      "-e",
+      `
+        const fs = require("node:fs");
+        process.stdout.write("READY");
+        process.stdin.once("data", () => {
+          fs.writeSync(1, "DONE");
+          process.exit(0);
+        });
+      `,
+    ]);
+    pty.onData((data) => {
+      output += data;
+    });
+    const exitInfo = new Promise<{ exitCode: number; signal: number }>((resolve) => {
+      pty.onExit(resolve);
+    });
+
+    await pty.waitFor("READY");
+    pty.pause();
+    pty.write("go\n");
+
+    await expect(pty.exited).resolves.toBe(0);
+    await expect(exitInfo).resolves.toEqual({ exitCode: 0, signal: 0 });
+    expect(output).toContain("DONE");
   });
 });
 
