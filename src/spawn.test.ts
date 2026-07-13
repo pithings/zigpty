@@ -79,6 +79,7 @@ describe("spawn", () => {
   it.skipIf(isWindows)("native callback delivers output before exit and stays alive", async () => {
     const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
     const script = `
+      const fs = require("node:fs");
       const path = require("node:path");
       const dir = ${JSON.stringify(prebuildsDir)};
       const base = "zigpty." + process.platform + "-" + process.arch;
@@ -91,6 +92,7 @@ describe("spawn", () => {
           output += event;
           return;
         }
+        fs.closeSync(result.fd);
         process.stdout.write(output + "|EXITED:" + event.exitCode);
       });
     `;
@@ -98,9 +100,38 @@ describe("spawn", () => {
     expect(stdout).toBe("RAW|EXITED:0");
   });
 
+  it.skipIf(isWindows)("native exit cleanup cannot close a recycled public fd", async () => {
+    const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
+    const script = `
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const dir = ${JSON.stringify(prebuildsDir)};
+      const base = "zigpty." + process.platform + "-" + process.arch;
+      let native;
+      try { native = require(path.join(dir, base + ".node")); }
+      catch { native = require(path.join(dir, base + "-musl.node")); }
+      let result;
+      result = native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, (event) => {
+        if (Buffer.isBuffer(event)) return;
+        fs.closeSync(result.fd);
+        const replacement = fs.openSync("/dev/null", "r");
+        const reused = replacement === result.fd;
+        setImmediate(() => {
+          let valid = true;
+          try { fs.fstatSync(replacement); } catch { valid = false; }
+          if (valid) fs.closeSync(replacement);
+          process.stdout.write(JSON.stringify({ reused, valid }));
+        });
+      });
+    `;
+    const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
+    expect(JSON.parse(stdout)).toEqual({ reused: true, valid: true });
+  });
+
   it.skipIf(isWindows)("native close drops queued data callbacks", async () => {
     const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
     const script = `
+      const fs = require("node:fs");
       const path = require("node:path");
       const dir = ${JSON.stringify(prebuildsDir)};
       const base = "zigpty." + process.platform + "-" + process.arch;
@@ -125,6 +156,7 @@ describe("spawn", () => {
             }
             return;
           }
+          fs.closeSync(result.fd);
           process.stdout.write(String(callbacksAfterClose));
         },
       );
@@ -148,18 +180,21 @@ describe("spawn", () => {
       const countPtys = () => fs.readdirSync(fdDirectory)
         .filter((fd) => tty.isatty(Number(fd))).length;
       try {
-        native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, null);
+        native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, {});
       } catch {}
       const before = countPtys();
+      let throws = 0;
       for (let index = 0; index < 20; index += 1) {
         try {
-          native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, null);
-        } catch {}
+          native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, {});
+        } catch {
+          throws += 1;
+        }
       }
-      process.stdout.write(String(countPtys() - before));
+      process.stdout.write(JSON.stringify({ leaked: countPtys() - before, throws }));
     `;
     const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
-    expect(stdout).toBe("0");
+    expect(JSON.parse(stdout)).toEqual({ leaked: 0, throws: 20 });
   });
 
   it.skipIf(isWindows)("completed native PTYs release fds and active threads", async () => {
@@ -185,6 +220,7 @@ describe("spawn", () => {
       const run = () => new Promise((resolve) => {
         const result = native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, (event) => {
           if (!Buffer.isBuffer(event)) {
+            fs.closeSync(result.fd);
             void result.handle;
             resolve();
           }
@@ -263,6 +299,83 @@ describe("spawn", () => {
           let childAlive = true;
           try { process.kill(childPid, 0); } catch { childAlive = false; }
           if (childAlive) throw new Error("PTY child survived Worker termination");
+          clearTimeout(guard);
+          process.stdout.write("CLEAN");
+        } finally {
+          killChild();
+          fs.rmSync(directory, { recursive: true, force: true });
+        }
+      })().catch((error) => {
+        process.stderr.write(error.stack || String(error));
+        process.exitCode = 1;
+      });
+    `;
+      const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
+      expect(stdout).toBe("CLEAN");
+    },
+  );
+
+  it.skipIf(isWindows)(
+    "Worker cleanup after child reap finishes without stale signaling",
+    async () => {
+      const moduleUrl = new URL("./index.ts", import.meta.url).href;
+      const script = `
+      const fs = require("node:fs");
+      const os = require("node:os");
+      const path = require("node:path");
+      const { Worker } = require("node:worker_threads");
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zigpty-worker-reaped-"));
+      const pidFile = path.join(directory, "child.pid");
+      let childPid;
+      const killChild = () => {
+        if (!childPid) {
+          try { childPid = Number(fs.readFileSync(pidFile, "utf8")); } catch {}
+        }
+        if (childPid) {
+          try { process.kill(childPid, "SIGKILL"); } catch {}
+        }
+      };
+      const guard = setTimeout(() => {
+        killChild();
+        process.stderr.write("Reaped Worker teardown timed out");
+        process.exit(2);
+      }, 5000);
+
+      (async () => {
+        try {
+          const worker = new Worker(
+            'const fs = require("node:fs");' +
+            'const { parentPort, workerData } = require("node:worker_threads");' +
+            '(async () => {' +
+            '  const { spawn } = await import(workerData.moduleUrl);' +
+            '  const pty = spawn(process.execPath, ["-e", workerData.childScript]);' +
+            '  fs.writeFileSync(workerData.pidFile, String(pty.pid));' +
+            '  parentPort.postMessage(pty.pid);' +
+            '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);' +
+            '})();',
+            {
+              eval: true,
+              execArgv: [],
+              workerData: {
+                moduleUrl: ${JSON.stringify(moduleUrl)},
+                pidFile,
+                childScript: 'require("node:fs").writeSync(1, "x".repeat(4_000))',
+              },
+            },
+          );
+          childPid = await new Promise((resolve, reject) => {
+            worker.once("message", resolve);
+            worker.once("error", reject);
+          });
+          while (true) {
+            try {
+              process.kill(childPid, 0);
+              await new Promise(setImmediate);
+            } catch {
+              break;
+            }
+          }
+          await worker.terminate();
           clearTimeout(guard);
           process.stdout.write("CLEAN");
         } finally {
@@ -707,6 +820,105 @@ describe("close", () => {
     expect(() => process.kill(pid, 0)).toThrow();
     expect(() => fs.fstatSync(fd)).toThrow();
   });
+
+  it.skipIf(isWindows)("should stop public data callbacks when terminal data closes", async () => {
+    let pty: ReturnType<typeof spawn>;
+    let publicCallbacks = 0;
+    pty = spawn(
+      process.execPath,
+      ["-e", 'process.stdout.write("CLOSE"); setInterval(() => {}, 1000)'],
+      {
+        terminal: {
+          data(_terminal, data) {
+            if (Buffer.from(data).includes(0x43)) pty.close();
+          },
+        },
+      },
+    );
+    pty.onData((data) => {
+      if (Buffer.from(data).includes(0x43)) publicCallbacks += 1;
+    });
+
+    await pty.exited;
+    expect(publicCallbacks).toBe(0);
+  });
+
+  it.skipIf(isWindows)("should terminate inheriting process-group descendants", async () => {
+    const leaderScript = `
+      const { spawn } = require("node:child_process");
+      const child = spawn(
+        process.execPath,
+        ["-e", 'process.on("SIGHUP", () => {}); setInterval(() => {}, 1000)'],
+        { stdio: "inherit" },
+      );
+      process.stdout.write("DESC:" + child.pid + "\\n");
+      setInterval(() => {}, 1000);
+    `;
+    const pty = spawn(process.execPath, ["-e", leaderScript]);
+    let descendant = -1;
+
+    try {
+      const output = await pty.waitFor("\n");
+      descendant = Number(output.match(/DESC:(\d+)/)?.[1]);
+      expect(descendant).toBeGreaterThan(0);
+
+      pty.close();
+      await pty.exited;
+      expect(() => process.kill(descendant, 0)).toThrow();
+    } finally {
+      pty.close();
+      if (descendant > 0) {
+        try {
+          process.kill(descendant, "SIGKILL");
+        } catch {}
+      }
+      await pty.exited;
+    }
+  });
+
+  it.skipIf(isWindows)(
+    "should release the PTY while leaving detached descendants outside its group",
+    async () => {
+      const leaderScript = `
+      const { spawn } = require("node:child_process");
+      const child = spawn(
+        process.execPath,
+        ["-e", 'process.on("SIGHUP", () => {}); setInterval(() => {}, 1000)'],
+        { detached: true, stdio: "inherit" },
+      );
+      process.stdout.write("DESC:" + child.pid + "\\n");
+      setInterval(() => {}, 1000);
+    `;
+      const pty = spawn(process.execPath, ["-e", leaderScript]);
+      let descendant = -1;
+
+      try {
+        const output = await pty.waitFor("\n");
+        descendant = Number(output.match(/DESC:(\d+)/)?.[1]);
+        expect(descendant).toBeGreaterThan(0);
+
+        pty.close();
+        await pty.exited;
+        expect(() => process.kill(descendant, 0)).not.toThrow();
+      } finally {
+        pty.close();
+        if (descendant > 0) {
+          try {
+            process.kill(descendant, "SIGKILL");
+          } catch {}
+          while (true) {
+            try {
+              process.kill(descendant, 0);
+              await setImmediate();
+            } catch {
+              break;
+            }
+          }
+        }
+        await pty.exited;
+      }
+    },
+  );
 });
 
 describeUnix("flow control (unix)", () => {

@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { native as _native } from "../napi.ts";
@@ -25,6 +26,7 @@ const UNIX_SANITIZE_KEYS = [
 
 export class UnixPty extends BasePty {
   private _fd: number;
+  private _fdClosed = false;
   private _handle: object;
   private _pty: string;
   private _encoding: BufferEncoding | null;
@@ -144,12 +146,14 @@ export class UnixPty extends BasePty {
     const trailing = this._decoder?.end();
     if (trailing && !this._closed) this._emitOutput(trailing);
     this._wq.close();
+    this._closeFd();
     this._handleExit(info);
   }
 
   private _emitData(data: Buffer): void {
     if (this._terminal && !this._terminal.closed) {
       this._terminal._emitData(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+      if (this._closed) return;
     }
 
     const output = this._decoder ? this._decoder.write(data) : data;
@@ -167,7 +171,16 @@ export class UnixPty extends BasePty {
     }
     for (const listener of this._dataListeners) {
       listener(output);
+      if (this._closed) break;
     }
+  }
+
+  private _closeFd(): void {
+    if (this._fdClosed) return;
+    this._fdClosed = true;
+    try {
+      fs.closeSync(this._fd);
+    } catch {}
   }
 }
 

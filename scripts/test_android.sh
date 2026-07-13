@@ -117,6 +117,7 @@ const result = native.fork(
     }
 
     console.log("  exit: code=%d signal=%d", event.exitCode, event.signal);
+    fs.closeSync(result.fd);
     if (!output.includes("hello-zigpty-android") || event.exitCode !== 0) {
       console.log("  FAIL: missing output or non-zero exit");
       process.exit(1);

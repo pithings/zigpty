@@ -28,13 +28,17 @@ const ExitContext = struct {
     env: napi.napi_env,
     tsfn: napi.napi_threadsafe_function,
     pid: lib.Pid,
+    public_fd: lib.Fd,
     fd: lib.Fd,
+    wake_read_fd: lib.Fd,
+    wake_write_fd: lib.Fd,
     read_thread: std.Thread,
     mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
     condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER,
     paused: bool = false,
     draining: bool = false,
     closing: bool = false,
+    reaped: bool = false,
     env_closing: bool = false,
     finished: bool = false,
     monitor_finished: bool = false,
@@ -44,6 +48,40 @@ const ExitContext = struct {
     paused_len: usize = 0,
     references: std.atomic.Value(u8) = std.atomic.Value(u8).init(1),
 };
+
+fn duplicateFd(fd: lib.Fd) !lib.Fd {
+    while (true) {
+        const duplicated = std.c.fcntl(fd, std.c.F.DUPFD_CLOEXEC, @as(c_int, 0));
+        if (duplicated >= 0) return duplicated;
+        if (@as(std.posix.E, @enumFromInt(std.c._errno().*)) != .INTR) return error.DuplicateFdFailed;
+    }
+}
+
+fn createWakePipe() ![2]lib.Fd {
+    while (true) {
+        var fds: [2]std.c.fd_t = undefined;
+        if (std.c.pipe(&fds) == 0) return fds;
+        if (@as(std.posix.E, @enumFromInt(std.c._errno().*)) != .INTR) return error.CreatePipeFailed;
+    }
+}
+
+fn wakeReader(ctx: *ExitContext) void {
+    lockContext(ctx);
+    defer unlockContext(ctx);
+    if (ctx.wake_write_fd < 0) return;
+    const byte = [_]u8{0};
+    while (std.c.write(ctx.wake_write_fd, &byte, byte.len) < 0) {
+        if (@as(std.posix.E, @enumFromInt(std.c._errno().*)) != .INTR) return;
+    }
+}
+
+fn closePublicFd(ctx: *ExitContext) void {
+    lockContext(ctx);
+    const fd = ctx.public_fd;
+    ctx.public_fd = -1;
+    unlockContext(ctx);
+    if (fd >= 0) _ = std.c.close(fd);
+}
 
 fn retainContext(ctx: *ExitContext) void {
     _ = ctx.references.fetchAdd(1, .monotonic);
@@ -88,9 +126,15 @@ fn releaseTsfn(ctx: *ExitContext, mode: napi.napi_threadsafe_function_release_mo
 fn finishMonitor(ctx: *ExitContext) void {
     releaseTsfn(ctx, .release);
     lockContext(ctx);
+    const wake_read_fd = ctx.wake_read_fd;
+    const wake_write_fd = ctx.wake_write_fd;
+    ctx.wake_read_fd = -1;
+    ctx.wake_write_fd = -1;
     ctx.monitor_finished = true;
     _ = std.c.pthread_cond_broadcast(&ctx.condition);
     unlockContext(ctx);
+    _ = std.c.close(wake_read_fd);
+    _ = std.c.close(wake_write_fd);
     releaseContext(ctx);
 }
 
@@ -101,6 +145,7 @@ fn removeCleanupHook(ctx: *ExitContext) void {
         return;
     }
     ctx.cleanup_hook_registered = false;
+    ctx.public_fd = -1;
     unlockContext(ctx);
 
     std.debug.assert(napi.napi_remove_env_cleanup_hook(
@@ -109,6 +154,19 @@ fn removeCleanupHook(ctx: *ExitContext) void {
         @ptrCast(ctx),
     ) == .ok);
     releaseContext(ctx);
+}
+
+fn terminateContext(ctx: *ExitContext, env_closing: bool) void {
+    lockContext(ctx);
+    if (env_closing) ctx.env_closing = true;
+    const should_signal = !ctx.closing and !ctx.reaped;
+    ctx.closing = true;
+    ctx.paused = false;
+    _ = std.c.pthread_cond_broadcast(&ctx.condition);
+    unlockContext(ctx);
+
+    wakeReader(ctx);
+    if (should_signal) std.posix.kill(-ctx.pid, .KILL) catch {};
 }
 
 fn environmentCleanup(raw_ctx: ?*anyopaque) callconv(.c) void {
@@ -120,15 +178,11 @@ fn environmentCleanup(raw_ctx: ?*anyopaque) callconv(.c) void {
         return;
     }
     ctx.cleanup_hook_registered = false;
-    ctx.env_closing = true;
-    ctx.closing = true;
-    ctx.paused = false;
-    _ = std.c.pthread_cond_broadcast(&ctx.condition);
     unlockContext(ctx);
 
     releaseTsfn(ctx, .abort);
-    std.posix.kill(ctx.pid, .HUP) catch {};
-    std.posix.kill(ctx.pid, .KILL) catch {};
+    terminateContext(ctx, true);
+    closePublicFd(ctx);
 
     lockContext(ctx);
     while (!ctx.monitor_finished) {
@@ -228,6 +282,16 @@ fn flushPausedData(ctx: *ExitContext) bool {
     return queueData(ctx, data);
 }
 
+fn waitForPtyData(ctx: *ExitContext) bool {
+    var poll_fds = [_]std.posix.pollfd{
+        .{ .fd = ctx.fd, .events = @intCast(std.c.POLL.IN), .revents = 0 },
+        .{ .fd = ctx.wake_read_fd, .events = @intCast(std.c.POLL.IN), .revents = 0 },
+    };
+    _ = std.posix.poll(&poll_fds, -1) catch return false;
+    if (poll_fds[1].revents != 0) return false;
+    return poll_fds[0].revents != 0;
+}
+
 fn readThread(ctx: *ExitContext) void {
     defer _ = flushPausedData(ctx);
 
@@ -249,6 +313,7 @@ fn readThread(ctx: *ExitContext) void {
             if (!flushPausedData(ctx)) break;
             continue;
         }
+        if (!waitForPtyData(ctx)) break;
 
         var buffer: [4096]u8 = undefined;
         const bytes_read = std.posix.read(ctx.fd, buffer[0..read_size]) catch break;
@@ -285,18 +350,7 @@ fn setPaused(ctx: *ExitContext, paused: bool) void {
 }
 
 fn closeContext(ctx: *ExitContext) void {
-    lockContext(ctx);
-    if (ctx.closing or ctx.finished) {
-        unlockContext(ctx);
-        return;
-    }
-    ctx.closing = true;
-    ctx.paused = false;
-    _ = std.c.pthread_cond_broadcast(&ctx.condition);
-    unlockContext(ctx);
-
-    std.posix.kill(ctx.pid, .HUP) catch {};
-    std.posix.kill(ctx.pid, .KILL) catch {};
+    terminateContext(ctx, false);
 }
 
 /// Background thread that waits for process exit.
@@ -305,6 +359,7 @@ fn exitMonitorThread(ctx: *ExitContext) void {
 
     const info = lib.waitForExit(ctx.pid);
     lockContext(ctx);
+    ctx.reaped = true;
     ctx.draining = true;
     ctx.paused = false;
     _ = std.c.pthread_cond_broadcast(&ctx.condition);
@@ -380,14 +435,21 @@ fn getContext(env: napi.napi_env, info: napi.napi_callback_info) !*ExitContext {
 fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value {
     var exit_monitor_started = false;
     var child_pid: ?lib.Pid = null;
-    var result_fd: ?lib.Fd = null;
+    var public_fd: ?lib.Fd = null;
+    var native_fd: ?lib.Fd = null;
+    var wake_fds: ?[2]lib.Fd = null;
     errdefer {
         if (child_pid) |pid| {
             std.posix.kill(pid, .KILL) catch {};
             if (!exit_monitor_started) _ = lib.waitForExit(pid);
         }
+        if (public_fd) |fd| _ = std.c.close(fd);
         if (!exit_monitor_started) {
-            if (result_fd) |fd| _ = std.c.close(fd);
+            if (native_fd) |fd| _ = std.c.close(fd);
+            if (wake_fds) |fds| {
+                _ = std.c.close(fds[0]);
+                _ = std.c.close(fds[1]);
+            }
         }
     }
 
@@ -459,7 +521,15 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         return error.NapiFailed;
     };
     child_pid = result.pid;
-    result_fd = result.fd;
+    public_fd = result.fd;
+    native_fd = duplicateFd(result.fd) catch {
+        _ = napi.napi_throw_error(env, null, "failed to duplicate PTY fd");
+        return error.NapiFailed;
+    };
+    wake_fds = createWakePipe() catch {
+        _ = napi.napi_throw_error(env, null, "failed to create PTY wake pipe");
+        return error.NapiFailed;
+    };
 
     var resource_name: napi.napi_value = undefined;
     try napi.check(env, napi.napi_create_string_utf8(env, "zigpty_event", 12, &resource_name));
@@ -488,7 +558,10 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         .env = env,
         .tsfn = tsfn,
         .pid = result.pid,
-        .fd = result.fd,
+        .public_fd = result.fd,
+        .fd = native_fd.?,
+        .wake_read_fd = wake_fds.?[0],
+        .wake_write_fd = wake_fds.?[1],
         .read_thread = undefined,
     };
 
