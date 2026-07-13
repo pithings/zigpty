@@ -1,12 +1,29 @@
 /// Unix NAPI exports for zigpty (Linux + macOS).
 /// Bridges Node-API ↔ pure Zig PTY library for fork, open, resize, process.
 const std = @import("std");
+const builtin = @import("builtin");
 const napi = @import("napi.zig");
 const lib = @import("lib.zig");
 const pty = @import("pty.zig");
 
 const alloc = pty.alloc;
 const max_paused_bytes = 64 * 1024;
+
+const unix = struct {
+    extern fn waitid(
+        id_type: c_int,
+        id: c_uint,
+        info: *std.c.siginfo_t,
+        options: c_int,
+    ) c_int;
+};
+
+const FdIdentity = struct {
+    dev: u64,
+    ino: u64,
+    rdev: u64,
+    mode: u32,
+};
 
 const ExitEvent = struct {
     info: lib.ExitInfo,
@@ -28,7 +45,9 @@ const ExitContext = struct {
     env: napi.napi_env,
     tsfn: napi.napi_threadsafe_function,
     pid: lib.Pid,
+    pgid: lib.Pid,
     public_fd: lib.Fd,
+    public_fd_identity: FdIdentity,
     fd: lib.Fd,
     wake_read_fd: lib.Fd,
     wake_write_fd: lib.Fd,
@@ -38,6 +57,7 @@ const ExitContext = struct {
     paused: bool = false,
     draining: bool = false,
     closing: bool = false,
+    group_terminated: bool = false,
     reaped: bool = false,
     env_closing: bool = false,
     finished: bool = false,
@@ -48,6 +68,42 @@ const ExitContext = struct {
     paused_len: usize = 0,
     references: std.atomic.Value(u8) = std.atomic.Value(u8).init(1),
 };
+
+fn getFdIdentity(fd: lib.Fd) ?FdIdentity {
+    if (builtin.os.tag == .linux) {
+        var stat: std.os.linux.Statx = undefined;
+        const result = std.os.linux.statx(
+            fd,
+            "",
+            std.os.linux.AT.EMPTY_PATH,
+            .BASIC_STATS,
+            &stat,
+        );
+        if (std.posix.errno(result) != .SUCCESS) return null;
+        return .{
+            .dev = (@as(u64, stat.dev_major) << 32) | stat.dev_minor,
+            .ino = stat.ino,
+            .rdev = (@as(u64, stat.rdev_major) << 32) | stat.rdev_minor,
+            .mode = stat.mode,
+        };
+    }
+
+    var stat: std.c.Stat = undefined;
+    if (std.c.fstat(fd, &stat) != 0) return null;
+    return .{
+        .dev = @as(u32, @bitCast(stat.dev)),
+        .ino = @intCast(stat.ino),
+        .rdev = @as(u32, @bitCast(stat.rdev)),
+        .mode = stat.mode,
+    };
+}
+
+fn sameIdentity(left: FdIdentity, right: FdIdentity) bool {
+    return left.dev == right.dev and
+        left.ino == right.ino and
+        left.rdev == right.rdev and
+        left.mode == right.mode;
+}
 
 fn duplicateFd(fd: lib.Fd) !lib.Fd {
     while (true) {
@@ -78,9 +134,13 @@ fn wakeReader(ctx: *ExitContext) void {
 fn closePublicFd(ctx: *ExitContext) void {
     lockContext(ctx);
     const fd = ctx.public_fd;
+    const identity = ctx.public_fd_identity;
     ctx.public_fd = -1;
     unlockContext(ctx);
-    if (fd >= 0) _ = std.c.close(fd);
+    if (fd >= 0) {
+        const current_identity = getFdIdentity(fd) orelse return;
+        if (sameIdentity(identity, current_identity)) _ = std.c.close(fd);
+    }
 }
 
 fn retainContext(ctx: *ExitContext) void {
@@ -156,17 +216,36 @@ fn removeCleanupHook(ctx: *ExitContext) void {
     releaseContext(ctx);
 }
 
+fn waitForExitPending(pid: lib.Pid) bool {
+    const flags: c_int = if (builtin.os.tag == .macos)
+        0x00000004 | 0x00000020
+    else
+        std.c.W.EXITED | std.c.W.NOWAIT;
+    var info: std.c.siginfo_t = undefined;
+    while (true) {
+        if (unix.waitid(1, @intCast(pid), &info, flags) == 0) return true;
+        if (@as(std.posix.E, @enumFromInt(std.c._errno().*)) != .INTR) return false;
+    }
+}
+
+fn terminateProcessGroup(ctx: *ExitContext) void {
+    lockContext(ctx);
+    const should_signal = !ctx.group_terminated and !ctx.reaped;
+    ctx.group_terminated = true;
+    unlockContext(ctx);
+    if (should_signal) std.posix.kill(-ctx.pgid, .KILL) catch {};
+}
+
 fn terminateContext(ctx: *ExitContext, env_closing: bool) void {
     lockContext(ctx);
     if (env_closing) ctx.env_closing = true;
-    const should_signal = !ctx.closing and !ctx.reaped;
     ctx.closing = true;
     ctx.paused = false;
     _ = std.c.pthread_cond_broadcast(&ctx.condition);
     unlockContext(ctx);
 
     wakeReader(ctx);
-    if (should_signal) std.posix.kill(-ctx.pid, .KILL) catch {};
+    terminateProcessGroup(ctx);
 }
 
 fn environmentCleanup(raw_ctx: ?*anyopaque) callconv(.c) void {
@@ -217,6 +296,10 @@ fn eventCallJs(
     const env = maybe_env orelse return;
     const js_callback = maybe_js_callback orelse return;
 
+    const exit_ctx: ?*ExitContext = switch (event.*) {
+        .data => null,
+        .exit => |exit_event| exit_event.ctx,
+    };
     const value = switch (event.*) {
         .data => |data_event| value: {
             lockContext(data_event.ctx);
@@ -235,7 +318,6 @@ fn eventCallJs(
             break :value buffer;
         },
         .exit => |exit_event| value: {
-            removeCleanupHook(exit_event.ctx);
             break :value pty.createExitInfo(env, exit_event.info) orelse return;
         },
     };
@@ -244,7 +326,10 @@ fn eventCallJs(
     if (napi.napi_get_undefined(env, &undefined_value) != .ok) return;
 
     var args = [_]napi.napi_value{value};
-    _ = napi.napi_call_function(env, undefined_value, js_callback, 1, &args, null);
+    const call_status = napi.napi_call_function(env, undefined_value, js_callback, 1, &args, null);
+    if (exit_ctx) |ctx| {
+        if (call_status == .ok or call_status == .pending_exception) removeCleanupHook(ctx);
+    }
 }
 
 fn queueData(ctx: *ExitContext, data: []u8) bool {
@@ -357,14 +442,24 @@ fn closeContext(ctx: *ExitContext) void {
 fn exitMonitorThread(ctx: *ExitContext) void {
     defer finishMonitor(ctx);
 
-    const info = lib.waitForExit(ctx.pid);
+    const pending_exit = waitForExitPending(ctx.pid);
+    var info: lib.ExitInfo = undefined;
+    if (!pending_exit) info = lib.waitForExit(ctx.pid);
+    if (pending_exit) terminateProcessGroup(ctx);
     lockContext(ctx);
-    ctx.reaped = true;
+    ctx.reaped = !pending_exit;
     ctx.draining = true;
     ctx.paused = false;
     _ = std.c.pthread_cond_broadcast(&ctx.condition);
     unlockContext(ctx);
     ctx.read_thread.join();
+
+    if (pending_exit) {
+        info = lib.waitForExit(ctx.pid);
+        lockContext(ctx);
+        ctx.reaped = true;
+        unlockContext(ctx);
+    }
 
     lockContext(ctx);
     ctx.finished = true;
@@ -436,6 +531,7 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
     var exit_monitor_started = false;
     var child_pid: ?lib.Pid = null;
     var public_fd: ?lib.Fd = null;
+    var public_fd_identity: ?FdIdentity = null;
     var native_fd: ?lib.Fd = null;
     var wake_fds: ?[2]lib.Fd = null;
     errdefer {
@@ -522,6 +618,11 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
     };
     child_pid = result.pid;
     public_fd = result.fd;
+    public_fd_identity = getFdIdentity(result.fd);
+    if (public_fd_identity == null) {
+        _ = napi.napi_throw_error(env, null, "failed to identify PTY fd");
+        return error.NapiFailed;
+    }
     native_fd = duplicateFd(result.fd) catch {
         _ = napi.napi_throw_error(env, null, "failed to duplicate PTY fd");
         return error.NapiFailed;
@@ -558,7 +659,9 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         .env = env,
         .tsfn = tsfn,
         .pid = result.pid,
+        .pgid = result.pid,
         .public_fd = result.fd,
+        .public_fd_identity = public_fd_identity.?,
         .fd = native_fd.?,
         .wake_read_fd = wake_fds.?[0],
         .wake_write_fd = wake_fds.?[1],

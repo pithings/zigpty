@@ -255,6 +255,7 @@ describe("spawn", () => {
       const pidFile = path.join(directory, "child.pid");
       let worker;
       let childPid;
+      let replacement;
       const readChildPid = () => {
         if (childPid) return childPid;
         try { return Number(fs.readFileSync(pidFile, "utf8")); }
@@ -279,8 +280,10 @@ describe("spawn", () => {
             '(async () => {' +
             '  const { spawn } = await import(workerData.moduleUrl);' +
             '  const pty = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);' +
+            '  const fd = pty._fd;' +
+            '  fs.closeSync(fd);' +
             '  fs.writeFileSync(workerData.pidFile, String(pty.pid));' +
-            '  parentPort.postMessage(pty.pid);' +
+            '  parentPort.postMessage({ pid: pty.pid, fd });' +
             '})();',
             {
               eval: true,
@@ -288,14 +291,18 @@ describe("spawn", () => {
               workerData: { moduleUrl: ${JSON.stringify(moduleUrl)}, pidFile },
             },
           );
-          childPid = await new Promise((resolve, reject) => {
+          const child = await new Promise((resolve, reject) => {
             worker.once("message", resolve);
             worker.once("error", reject);
             worker.once("exit", (code) => {
               if (code !== 0) reject(new Error("Worker exited before reporting its child"));
             });
           });
+          childPid = child.pid;
+          replacement = fs.openSync("/dev/null", "r");
+          if (replacement !== child.fd) throw new Error("Worker PTY fd was not reused");
           await worker.terminate();
+          fs.fstatSync(replacement);
           let childAlive = true;
           try { process.kill(childPid, 0); } catch { childAlive = false; }
           if (childAlive) throw new Error("PTY child survived Worker termination");
@@ -303,6 +310,9 @@ describe("spawn", () => {
           process.stdout.write("CLEAN");
         } finally {
           killChild();
+          if (replacement !== undefined) {
+            try { fs.closeSync(replacement); } catch {}
+          }
           fs.rmSync(directory, { recursive: true, force: true });
         }
       })().catch((error) => {
@@ -327,6 +337,7 @@ describe("spawn", () => {
       const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zigpty-worker-reaped-"));
       const pidFile = path.join(directory, "child.pid");
       let childPid;
+      let publicFd;
       const killChild = () => {
         if (!childPid) {
           try { childPid = Number(fs.readFileSync(pidFile, "utf8")); } catch {}
@@ -349,8 +360,12 @@ describe("spawn", () => {
             '(async () => {' +
             '  const { spawn } = await import(workerData.moduleUrl);' +
             '  const pty = spawn(process.execPath, ["-e", workerData.childScript]);' +
+            '  const stat = fs.fstatSync(pty._fd);' +
             '  fs.writeFileSync(workerData.pidFile, String(pty.pid));' +
-            '  parentPort.postMessage(pty.pid);' +
+            '  parentPort.postMessage({' +
+            '    pid: pty.pid, fd: pty._fd,' +
+            '    identity: [stat.dev, stat.ino, stat.rdev, stat.mode],' +
+            '  });' +
             '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);' +
             '})();',
             {
@@ -363,10 +378,12 @@ describe("spawn", () => {
               },
             },
           );
-          childPid = await new Promise((resolve, reject) => {
+          const child = await new Promise((resolve, reject) => {
             worker.once("message", resolve);
             worker.once("error", reject);
           });
+          childPid = child.pid;
+          publicFd = child.fd;
           while (true) {
             try {
               process.kill(childPid, 0);
@@ -376,6 +393,13 @@ describe("spawn", () => {
             }
           }
           await worker.terminate();
+          let samePty = false;
+          try {
+            const stat = fs.fstatSync(publicFd);
+            samePty = [stat.dev, stat.ino, stat.rdev, stat.mode]
+              .every((value, index) => value === child.identity[index]);
+          } catch {}
+          if (samePty) throw new Error("Worker PTY fd survived environment cleanup");
           clearTimeout(guard);
           process.stdout.write("CLEAN");
         } finally {
@@ -843,38 +867,63 @@ describe("close", () => {
     expect(publicCallbacks).toBe(0);
   });
 
-  it.skipIf(isWindows)("should terminate inheriting process-group descendants", async () => {
-    const leaderScript = `
-      const { spawn } = require("node:child_process");
-      const child = spawn(
-        process.execPath,
-        ["-e", 'process.on("SIGHUP", () => {}); setInterval(() => {}, 1000)'],
-        { stdio: "inherit" },
-      );
-      process.stdout.write("DESC:" + child.pid + "\\n");
+  it.skipIf(isWindows)(
+    "should terminate inheriting descendants when the leader exits first",
+    async () => {
+      const childScript = `
+      process.on("SIGHUP", () => {});
+      process.send("ready");
+      process.disconnect();
       setInterval(() => {}, 1000);
     `;
-    const pty = spawn(process.execPath, ["-e", leaderScript]);
-    let descendant = -1;
+      const leaderScript = `
+      const { spawn } = require("node:child_process");
+      const child = spawn(process.execPath, ["-e", ${JSON.stringify(childScript)}], {
+        stdio: ["inherit", "inherit", "inherit", "ipc"],
+      });
+      child.on("message", () => {
+        process.stdout.write("DESC:" + child.pid + "\\n");
+        child.unref();
+      });
+    `;
+      const pty = spawn(process.execPath, ["-e", leaderScript]);
+      let descendant = -1;
 
-    try {
-      const output = await pty.waitFor("\n");
-      descendant = Number(output.match(/DESC:(\d+)/)?.[1]);
-      expect(descendant).toBeGreaterThan(0);
+      try {
+        const output = await pty.waitFor("\n");
+        descendant = Number(output.match(/DESC:(\d+)/)?.[1]);
+        expect(descendant).toBeGreaterThan(0);
 
-      pty.close();
-      await pty.exited;
-      expect(() => process.kill(descendant, 0)).toThrow();
-    } finally {
-      pty.close();
-      if (descendant > 0) {
-        try {
-          process.kill(descendant, "SIGKILL");
-        } catch {}
+        while (true) {
+          try {
+            process.kill(pty.pid, 0);
+            await setImmediate();
+          } catch {
+            break;
+          }
+        }
+        pty.close();
+        await pty.exited;
+        while (true) {
+          try {
+            process.kill(descendant, 0);
+            await setImmediate();
+          } catch {
+            break;
+          }
+        }
+        expect(() => process.kill(descendant, 0)).toThrow();
+      } finally {
+        pty.close();
+        if (descendant > 0) {
+          try {
+            process.kill(descendant, "SIGKILL");
+          } catch {}
+        }
+        await pty.exited;
       }
-      await pty.exited;
-    }
-  });
+    },
+  );
 
   it.skipIf(isWindows)(
     "should release the PTY while leaving detached descendants outside its group",
