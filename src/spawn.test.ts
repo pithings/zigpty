@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { open, spawn } from "./index.ts";
 
 const execFileP = promisify(execFile);
+const nodeExecutable = "bun" in process.versions ? "node" : process.execPath;
 
 const isWindows = platform() === "win32";
 const shell = isWindows ? "cmd.exe" : "/bin/sh";
@@ -93,8 +94,116 @@ describe("spawn", () => {
         process.stdout.write(output + "|EXITED:" + event.exitCode);
       });
     `;
-    const { stdout } = await execFileP(process.execPath, ["-e", script], { timeout: 10_000 });
+    const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
     expect(stdout).toBe("RAW|EXITED:0");
+  });
+
+  it.skipIf(isWindows)("native close drops queued data callbacks", async () => {
+    const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
+    const script = `
+      const path = require("node:path");
+      const dir = ${JSON.stringify(prebuildsDir)};
+      const base = "zigpty." + process.platform + "-" + process.arch;
+      let native;
+      try { native = require(path.join(dir, base + ".node")); }
+      catch { native = require(path.join(dir, base + "-musl.node")); }
+      let result;
+      let closed = false;
+      let callbacksAfterClose = 0;
+      result = native.fork(
+        process.execPath,
+        ["-e", 'require("node:fs").writeSync(1, "x".repeat(1_000_000)); setInterval(() => {}, 1000)'],
+        Object.entries(process.env).map(([key, value]) => key + "=" + value),
+        process.cwd(), 80, 24, -1, -1, true,
+        (event) => {
+          if (Buffer.isBuffer(event)) {
+            if (!closed) {
+              closed = true;
+              native.close(result.handle);
+            } else {
+              callbacksAfterClose += 1;
+            }
+            return;
+          }
+          process.stdout.write(String(callbacksAfterClose));
+        },
+      );
+    `;
+    const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
+    expect(stdout).toBe("0");
+  });
+
+  it.skipIf(isWindows)("native fork failures close the master fd", async () => {
+    const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
+    const script = `
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const tty = require("node:tty");
+      const dir = ${JSON.stringify(prebuildsDir)};
+      const base = "zigpty." + process.platform + "-" + process.arch;
+      let native;
+      try { native = require(path.join(dir, base + ".node")); }
+      catch { native = require(path.join(dir, base + "-musl.node")); }
+      const fdDirectory = process.platform === "darwin" ? "/dev/fd" : "/proc/self/fd";
+      const countPtys = () => fs.readdirSync(fdDirectory)
+        .filter((fd) => tty.isatty(Number(fd))).length;
+      try {
+        native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, null);
+      } catch {}
+      const before = countPtys();
+      for (let index = 0; index < 20; index += 1) {
+        try {
+          native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, null);
+        } catch {}
+      }
+      process.stdout.write(String(countPtys() - before));
+    `;
+    const { stdout } = await execFileP(nodeExecutable, ["-e", script], { timeout: 10_000 });
+    expect(stdout).toBe("0");
+  });
+
+  it.skipIf(isWindows)("completed native PTYs release fds and active threads", async () => {
+    const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
+    const script = `
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const { execFileSync } = require("node:child_process");
+      const dir = ${JSON.stringify(prebuildsDir)};
+      const base = "zigpty." + process.platform + "-" + process.arch;
+      let native;
+      try { native = require(path.join(dir, base + ".node")); }
+      catch { native = require(path.join(dir, base + "-musl.node")); }
+      const fdDirectory = process.platform === "darwin" ? "/dev/fd" : "/proc/self/fd";
+      const threadCount = () => {
+        if (process.platform === "linux") {
+          return Number(fs.readFileSync("/proc/self/status", "utf8").match(/^Threads:\\s+(\\d+)$/m)[1]);
+        }
+        return execFileSync("ps", ["-M", "-p", String(process.pid)], { encoding: "utf8" })
+          .trim().split("\\n").length - 1;
+      };
+      const before = { fds: fs.readdirSync(fdDirectory).length, threads: threadCount() };
+      const run = () => new Promise((resolve) => {
+        const result = native.fork("/bin/true", [], [], process.cwd(), 80, 24, -1, -1, true, (event) => {
+          if (!Buffer.isBuffer(event)) {
+            void result.handle;
+            resolve();
+          }
+        });
+      });
+      (async () => {
+        for (let index = 0; index < 100; index += 1) await run();
+        global.gc();
+        const after = { fds: fs.readdirSync(fdDirectory).length, threads: threadCount() };
+        process.stdout.write(JSON.stringify({
+          fds: after.fds - before.fds,
+          threads: after.threads - before.threads,
+        }));
+      })();
+    `;
+    const { stdout } = await execFileP(nodeExecutable, ["--expose-gc", "-e", script], {
+      timeout: 20_000,
+    });
+    expect(JSON.parse(stdout)).toEqual({ fds: 0, threads: 0 });
   });
 
   it("should fire onExit callback", async () => {

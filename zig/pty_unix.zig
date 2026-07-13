@@ -13,8 +13,13 @@ const ExitEvent = struct {
     fd: lib.Fd,
 };
 
-const PtyEvent = union(enum) {
+const DataEvent = struct {
     data: []u8,
+    ctx: *ExitContext,
+};
+
+const PtyEvent = union(enum) {
+    data: DataEvent,
     exit: ExitEvent,
 };
 
@@ -65,7 +70,10 @@ fn unlockContext(ctx: *ExitContext) void {
 
 fn destroyEvent(event: *PtyEvent) void {
     switch (event.*) {
-        .data => |data| alloc.free(data),
+        .data => |data_event| {
+            alloc.free(data_event.data);
+            releaseContext(data_event.ctx);
+        },
         .exit => |exit_event| _ = std.c.close(exit_event.fd),
     }
     alloc.destroy(event);
@@ -81,9 +89,20 @@ fn eventCallJs(
     defer destroyEvent(event);
 
     const value = switch (event.*) {
-        .data => |data| value: {
+        .data => |data_event| value: {
+            lockContext(data_event.ctx);
+            const closing = data_event.ctx.closing;
+            unlockContext(data_event.ctx);
+            if (closing) return;
+
             var buffer: napi.napi_value = undefined;
-            if (napi.napi_create_buffer_copy(env, data.len, data.ptr, null, &buffer) != .ok) return;
+            if (napi.napi_create_buffer_copy(
+                env,
+                data_event.data.len,
+                data_event.data.ptr,
+                null,
+                &buffer,
+            ) != .ok) return;
             break :value buffer;
         },
         .exit => |exit_event| pty.createExitInfo(env, exit_event.info) orelse return,
@@ -101,7 +120,8 @@ fn queueData(ctx: *ExitContext, data: []u8) bool {
         alloc.free(data);
         return false;
     };
-    event.* = .{ .data = data };
+    retainContext(ctx);
+    event.* = .{ .data = .{ .data = data, .ctx = ctx } };
 
     if (napi.napi_call_threadsafe_function(ctx.tsfn, @ptrCast(event), .blocking) == .ok) {
         return true;
@@ -278,10 +298,16 @@ fn getContext(env: napi.napi_env, info: napi.napi_callback_info) !*ExitContext {
 fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value {
     var exit_monitor_started = false;
     var child_pid: ?lib.Pid = null;
-    errdefer if (child_pid) |pid| {
-        std.posix.kill(pid, .KILL) catch {};
-        if (!exit_monitor_started) _ = lib.waitForExit(pid);
-    };
+    var result_fd: ?lib.Fd = null;
+    errdefer {
+        if (child_pid) |pid| {
+            std.posix.kill(pid, .KILL) catch {};
+            if (!exit_monitor_started) _ = lib.waitForExit(pid);
+        }
+        if (!exit_monitor_started) {
+            if (result_fd) |fd| _ = std.c.close(fd);
+        }
+    }
 
     var argc: usize = 10;
     var argv: [10]napi.napi_value = undefined;
@@ -351,6 +377,7 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         return error.NapiFailed;
     };
     child_pid = result.pid;
+    result_fd = result.fd;
 
     var resource_name: napi.napi_value = undefined;
     try napi.check(env, napi.napi_create_string_utf8(env, "zigpty_event", 12, &resource_name));
@@ -389,7 +416,7 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         return error.NapiFailed;
     };
 
-    _ = std.Thread.spawn(.{}, exitMonitorThread, .{ctx}) catch {
+    const exit_thread = std.Thread.spawn(.{}, exitMonitorThread, .{ctx}) catch {
         closeContext(ctx);
         ctx.read_thread.join();
         _ = napi.napi_release_threadsafe_function(tsfn, .abort);
@@ -398,6 +425,7 @@ fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value 
         return error.NapiFailed;
     };
     exit_monitor_started = true;
+    exit_thread.detach();
 
     var js_result: napi.napi_value = undefined;
     try napi.check(env, napi.napi_create_object(env, &js_result));
