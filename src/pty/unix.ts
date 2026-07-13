@@ -32,9 +32,6 @@ export class UnixPty extends BasePty {
   private _flowControlPause: string;
   private _flowControlResume: string;
   private _wq: WriteQueue;
-  private _nativeExitInfo?: { exitCode: number; signal: number };
-  private _paused = false;
-  private _pausedData: Buffer[] = [];
 
   constructor(file: string, args: string[], options?: IPtyOptions) {
     const cols = options?.cols ?? DEFAULT_COLS;
@@ -66,16 +63,11 @@ export class UnixPty extends BasePty {
       useUtf8,
       (event) => {
         if (Buffer.isBuffer(event)) {
-          if (this._paused && !this._terminal) {
-            this._pausedData.push(event);
-          } else {
-            this._emitData(event);
-          }
+          if (!this._closed) this._emitData(event);
           return;
         }
 
-        this._nativeExitInfo = event;
-        this._finishExit();
+        this._finishExit(event);
       },
     );
 
@@ -132,25 +124,19 @@ export class UnixPty extends BasePty {
   }
 
   pause(): void {
-    if (!this._terminal) this._paused = true;
+    if (!this._closed) native.pause(this._fd);
   }
 
   resume(): void {
-    if (this._terminal || !this._paused) return;
-    this._paused = false;
-    for (const data of this._pausedData) {
-      this._emitData(data);
-    }
-    this._pausedData.length = 0;
-    this._finishExit();
+    if (!this._closed) native.resume(this._fd);
   }
 
   close(): void {
     if (this._closed) return;
-    this.resume();
     this._closed = true;
 
     this._wq.close();
+    native.resume(this._fd);
 
     try {
       process.kill(this.pid, 0);
@@ -158,13 +144,9 @@ export class UnixPty extends BasePty {
     } catch {}
   }
 
-  private _finishExit(): void {
-    if (!this._nativeExitInfo || this._pausedData.length > 0) return;
-
-    const info = this._nativeExitInfo;
-    this._nativeExitInfo = undefined;
+  private _finishExit(info: { exitCode: number; signal: number }): void {
     const trailing = this._decoder?.end();
-    if (trailing) this._emitOutput(trailing);
+    if (trailing && !this._closed) this._emitOutput(trailing);
     this._wq.close();
     try {
       fs.closeSync(this._fd);

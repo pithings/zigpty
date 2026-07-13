@@ -1,11 +1,27 @@
 /// Unix NAPI exports for zigpty (Linux + macOS).
 /// Bridges Node-API ↔ pure Zig PTY library for fork, open, resize, process.
 const std = @import("std");
+const builtin = @import("builtin");
 const napi = @import("napi.zig");
 const lib = @import("lib.zig");
 const pty = @import("pty.zig");
 
 const alloc = pty.alloc;
+
+const unix = struct {
+    extern fn tcflow(fd: c_int, action: c_int) c_int;
+
+    const output_pause = switch (builtin.os.tag) {
+        .linux => 0,
+        .macos => 1,
+        else => unreachable,
+    };
+    const output_resume = switch (builtin.os.tag) {
+        .linux => 1,
+        .macos => 2,
+        else => unreachable,
+    };
+};
 
 const PtyEvent = union(enum) {
     data: []u8,
@@ -66,6 +82,13 @@ fn readThread(ctx: *ExitContext) void {
     }
 }
 
+fn setOutputPaused(fd: lib.Fd, paused: bool) void {
+    const action: c_int = if (paused) unix.output_pause else unix.output_resume;
+    while (unix.tcflow(fd, action) != 0) {
+        if (@as(std.posix.E, @enumFromInt(std.c._errno().*)) != .INTR) return;
+    }
+}
+
 /// Background thread that waits for process exit.
 fn exitMonitorThread(ctx: *ExitContext) void {
     defer {
@@ -74,6 +97,7 @@ fn exitMonitorThread(ctx: *ExitContext) void {
     }
 
     const info = lib.waitForExit(ctx.pid);
+    setOutputPaused(ctx.fd, false);
     ctx.read_thread.join();
 
     const event = alloc.create(PtyEvent) catch return;
@@ -91,6 +115,26 @@ fn exitMonitorThread(ctx: *ExitContext) void {
 /// fork(file, args, env, cwd, cols, rows, uid, gid, useUtf8, onEvent) → { fd, pid, pty }
 pub fn fork(env: napi.napi_env, info: napi.napi_callback_info) callconv(.c) napi.napi_value {
     return forkImpl(env, info) catch return pty.returnUndef(env);
+}
+
+pub fn pause(env: napi.napi_env, info: napi.napi_callback_info) callconv(.c) napi.napi_value {
+    setPausedImpl(env, info, true) catch {};
+    return pty.returnUndef(env);
+}
+
+pub fn resumeOutput(env: napi.napi_env, info: napi.napi_callback_info) callconv(.c) napi.napi_value {
+    setPausedImpl(env, info, false) catch {};
+    return pty.returnUndef(env);
+}
+
+fn setPausedImpl(env: napi.napi_env, info: napi.napi_callback_info, paused: bool) !void {
+    var argc: usize = 1;
+    var argv: [1]napi.napi_value = undefined;
+    try napi.check(env, napi.napi_get_cb_info(env, info, &argc, &argv, null, null));
+
+    var fd: i32 = -1;
+    try napi.check(env, napi.napi_get_value_int32(env, argv[0], &fd));
+    if (fd >= 0) setOutputPaused(fd, paused);
 }
 
 fn forkImpl(env: napi.napi_env, info: napi.napi_callback_info) !napi.napi_value {

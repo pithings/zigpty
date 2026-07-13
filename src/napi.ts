@@ -34,6 +34,10 @@ export interface INativeUnix {
     onEvent: (event: Buffer | { exitCode: number; signal: number }) => void,
   ): { fd: number; pid: number; pty: string };
 
+  pause(fd: number): void;
+
+  resume(fd: number): void;
+
   open(cols: number, rows: number): { master: number; slave: number; pty: string };
 
   resize(fd: number, cols: number, rows: number, xPixel?: number, yPixel?: number): void;

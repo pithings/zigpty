@@ -1,6 +1,9 @@
 import { execFile } from "node:child_process";
-import { platform } from "node:os";
+import * as fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
+import { platform, tmpdir } from "node:os";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { open, spawn } from "./index.ts";
@@ -72,7 +75,7 @@ describe("spawn", () => {
   // the exit-monitor thread can dispatch the callback. Bypasses the TS layer
   // and drives the native binding directly so the test doesn't depend on
   // dist/ or a TS loader being available in the subprocess.
-  it.skipIf(isWindows)("exit callback keeps event loop alive (issue #4)", async () => {
+  it.skipIf(isWindows)("native callback delivers output before exit and stays alive", async () => {
     const prebuildsDir = path.resolve(__dirname, "..", "prebuilds");
     const script = `
       const path = require("node:path");
@@ -81,12 +84,19 @@ describe("spawn", () => {
       let native;
       try { native = require(path.join(dir, base + ".node")); }
       catch { native = require(path.join(dir, base + "-musl.node")); }
-      native.fork("true", [], [], process.cwd(), 80, 24, -1, -1, true, (info) => {
-        process.stdout.write("EXITED:" + info.exitCode);
+      const fs = require("node:fs");
+      let output = "";
+      const result = native.fork("/bin/sh", ["-c", "printf RAW"], [], process.cwd(), 80, 24, -1, -1, true, (event) => {
+        if (Buffer.isBuffer(event)) {
+          output += event;
+          return;
+        }
+        fs.closeSync(result.fd);
+        process.stdout.write(output + "|EXITED:" + event.exitCode);
       });
     `;
     const { stdout } = await execFileP(process.execPath, ["-e", script], { timeout: 10_000 });
-    expect(stdout).toBe("EXITED:0");
+    expect(stdout).toBe("RAW|EXITED:0");
   });
 
   it("should fire onExit callback", async () => {
@@ -433,6 +443,59 @@ describe("close", () => {
     // Process should have been killed
     expect(exitInfo.exitCode).not.toBe(-999);
   });
+
+  it.each(["onData", "terminal"] as const)(
+    "should suppress %s callbacks after close and release the fd",
+    async (mode) => {
+      const directory = await fsPromises.mkdtemp(path.join(tmpdir(), "zigpty-close-"));
+      const marker = path.join(directory, "sighup-handled");
+      let output = "";
+      const pty = spawn(
+        process.execPath,
+        [
+          "-e",
+          `
+            const fs = require("node:fs");
+            process.on("SIGHUP", () => {
+              fs.writeFileSync(${JSON.stringify(marker)}, "handled");
+              fs.writeSync(1, "AFTER_CLOSE");
+              process.exit(0);
+            });
+            process.stdout.write("READY");
+            setInterval(() => {}, 1000);
+          `,
+        ],
+        mode === "terminal"
+          ? {
+              terminal: {
+                data(_terminal, data) {
+                  output += Buffer.from(data).toString();
+                },
+              },
+            }
+          : undefined,
+      );
+
+      if (mode === "onData") {
+        pty.onData((data) => {
+          output += data;
+        });
+      }
+
+      try {
+        await pty.waitFor("READY");
+        const fd = (pty as unknown as { _fd: number })._fd;
+        pty.close();
+        await pty.exited;
+
+        expect(await fsPromises.readFile(marker, "utf8")).toBe("handled");
+        expect(output).not.toContain("AFTER_CLOSE");
+        expect(() => fs.fstatSync(fd)).toThrow();
+      } finally {
+        await fsPromises.rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describeUnix("flow control (unix)", () => {
@@ -560,6 +623,90 @@ describeUnix("pause/resume (unix)", () => {
     pty.resume();
 
     pty.kill("SIGTERM");
+  });
+
+  it("should apply backpressure to substantial output while paused", async () => {
+    const directory = await fsPromises.mkdtemp(path.join(tmpdir(), "zigpty-pause-"));
+    const marker = path.join(directory, "writing");
+    let outputBytes = 0;
+    const pty = spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+          const fs = require("node:fs");
+          process.stdout.write("READY");
+          process.stdin.once("data", () => {
+            fs.writeFileSync(${JSON.stringify(marker)}, "writing");
+            fs.writeSync(1, "x".repeat(1_000_000));
+            process.exit(0);
+          });
+        `,
+      ],
+      { encoding: null },
+    );
+    pty.onData((data) => {
+      const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      for (const byte of buffer) {
+        if (byte === 0x78) outputBytes += 1;
+      }
+    });
+
+    try {
+      await pty.waitFor("READY");
+      pty.pause();
+      pty.write("go\n");
+
+      while (true) {
+        try {
+          await fsPromises.readFile(marker);
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await setImmediate();
+        }
+      }
+
+      expect(pty.stats()).not.toBeNull();
+      expect(outputBytes).toBe(0);
+
+      pty.resume();
+      await pty.exited;
+      expect(outputBytes).toBe(1_000_000);
+    } finally {
+      pty.kill("SIGKILL");
+      await pty.exited;
+      await fsPromises.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("should deliver remaining output and exit while paused", async () => {
+    let output = "";
+    const pty = spawn(process.execPath, [
+      "-e",
+      `
+        const fs = require("node:fs");
+        process.stdout.write("READY");
+        process.stdin.once("data", () => {
+          fs.writeSync(1, "DONE");
+          process.exit(0);
+        });
+      `,
+    ]);
+    pty.onData((data) => {
+      output += data;
+    });
+    const exitInfo = new Promise<{ exitCode: number; signal: number }>((resolve) => {
+      pty.onExit(resolve);
+    });
+
+    await pty.waitFor("READY");
+    pty.pause();
+    pty.write("go\n");
+
+    await expect(pty.exited).resolves.toBe(0);
+    await expect(exitInfo).resolves.toEqual({ exitCode: 0, signal: 0 });
+    expect(output).toContain("DONE");
   });
 });
 
