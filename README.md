@@ -279,19 +279,20 @@ Specifics: OSC 0 sets both `title` and `iconName`; OSC 1 sets `iconName` only; O
 
 **Decoded shapes** (`DecodedOSC` union) cover the common codes out of the box:
 
-| Code            | `kind`(s)                                                                                         | Notes                                                                                                                                                    |
-| --------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `0` / `1` / `2` | `title`                                                                                           | Window / tab / icon title. C0 control bytes stripped.                                                                                                    |
-| `7`             | `cwd` (`source: "osc7"`)                                                                          | `<scheme>://<host>/<path>`. Path is percent-decoded; `host`/`scheme`/`local` exposed.                                                                    |
-| `8`             | `hyperlink`                                                                                       | `action: "open" \| "close"`; `id`, `uri`, and `params`. Empty URI = close.                                                                               |
-| `9`             | `progress` / `cwd` / `mark` / `notification`                                                      | `9;4;…` progress, `9;9;…` ConEmu/WT CWD report, `9;12` prompt mark, `9;<text>` iTerm2 Growl-style notification.                                          |
-| `52`            | `clipboard`                                                                                       | Set, query (`?`), or `clear` (Pd not base64). Multi-char `Pc` exposed via `selections[]`.                                                                |
-| `99`            | `notification` (`vendor: "kitty"`)                                                                | Title / body / phase (`close`, `alive`, `icon`, …); honors `i=` (id), `u=` (urgency), `d=0` (partial chunk), `e=1` (base64 payload).                     |
-| `133`           | `shellIntegration` (`vendor: "vt"`)                                                               | FinalTerm A/B/C/D. `D` parses exit code + `err=`; `A`/`C` parse kitty extras into `params`.                                                              |
-| `633`           | `shellIntegration` (`vendor: "vscode"`)                                                           | A/B/C/D/E/P/EnvSingleStart/EnvSingleEntry/EnvSingleEnd. Applies VSCode `\\`/`\xNN` unescaping.                                                           |
-| `777`           | `notification` (`vendor: "rxvt"`)                                                                 | `notify;<title>;<body>` from the urxvt-perl extension.                                                                                                   |
-| `1337`          | `attention` / `cwd` / `mark` / `userVar` / `remoteHost` / `clipboard` / `shellIntegrationVersion` | iTerm2: `RequestAttention` (`yes`/`no`/`once`/`fireworks`), `CurrentDir=`, `SetMark`, `SetUserVar=`, `RemoteHost=`, `Copy=`, `ShellIntegrationVersion=`. |
-| _other_         | `unknown`                                                                                         | Raw `{code, payload}` preserved.                                                                                                                         |
+| Code            | `kind`(s)                                                                                         | Notes                                                                                                                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0` / `1` / `2` | `title`                                                                                           | Window / tab / icon title. C0 control bytes stripped.                                                                                                                 |
+| `7`             | `cwd` (`source: "osc7"`)                                                                          | `<scheme>://<host>/<path>`. Path is percent-decoded; `host`/`scheme`/`local` exposed.                                                                                 |
+| `8`             | `hyperlink`                                                                                       | `action: "open" \| "close"`; `id`, `uri`, and `params`. Empty URI = close.                                                                                            |
+| `9`             | `progress` / `cwd` / `mark` / `notification`                                                      | `9;4;…` progress, `9;9;…` ConEmu/WT CWD report, `9;12` prompt mark, `9;<text>` iTerm2 Growl-style notification.                                                       |
+| `52`            | `clipboard`                                                                                       | Set, query (`?`), or `clear` (Pd not base64). Multi-char `Pc` exposed via `selections[]`.                                                                             |
+| `99`            | `notification` (`vendor: "kitty"`)                                                                | Title / body / phase (`close`, `alive`, `icon`, …); honors `i=` (id), `u=` (urgency), `d=0` (partial chunk), `e=1` (base64 payload).                                  |
+| `133`           | `shellIntegration` (`vendor: "vt"`)                                                               | FinalTerm A/B/C/D. `D` parses exit code + `err=`; `A`/`C` parse kitty extras into `params`.                                                                           |
+| `633`           | `shellIntegration` (`vendor: "vscode"`)                                                           | A/B/C/D/E/P/EnvSingleStart/EnvSingleEntry/EnvSingleEnd. Applies VSCode `\\`/`\xNN` unescaping.                                                                        |
+| `777`           | `notification` (`vendor: "rxvt"`)                                                                 | `notify;<title>;<body>` from the urxvt-perl extension.                                                                                                                |
+| `1337`          | `attention` / `cwd` / `mark` / `userVar` / `remoteHost` / `clipboard` / `shellIntegrationVersion` | iTerm2: `RequestAttention` (`yes`/`no`/`once`/`fireworks`), `CurrentDir=`, `SetMark`, `SetUserVar=`, `RemoteHost=`, `Copy=`, `ShellIntegrationVersion=`.              |
+| `7577`          | `resume` (**experimental**)                                                                       | Program Resume Protocol. `valid` + `pid`/`time`/`argv`/`cwd`/`clear`/`need`/`mac`/`signed`. Not authenticated — see [`zigpty/resume`](#program-resume--zigptyresume). |
+| _other_         | `unknown`                                                                                         | Raw `{code, payload}` preserved.                                                                                                                                      |
 
 **Adding custom decoders** — use `createOSCDecoder()` to register handlers for new codes (or override built-ins). The returned function is typed as `DecodedOSC | <your custom kinds>`:
 
@@ -349,6 +350,98 @@ type IdleEvent = {
   durationMs: number; // how long the previous state lasted
 };
 ```
+
+### Program resume — `zigpty/resume`
+
+> [!WARNING]
+> **Experimental.** Implements the [Program Resume Protocol (OSC 7577)](https://www.superlogical.com/rex/docs/build/program-resume) at spec rev 0.5. The spec is new and may change; this API may change with it.
+
+Lets programs running in your terminal (editors, git TUIs, agent CLIs, …) tell the host how to bring them back after the host restarts. The host puts a random per-pane token in `OSC7577_TOKEN`; a program that wants to be resumable writes a signed `OSC 7577` report with its resume command. `ResumeTracker` verifies each report and keeps the latest command per owning pid.
+
+```ts
+import { spawn } from "zigpty";
+import { ResumeTracker } from "zigpty/resume";
+
+const resume = new ResumeTracker(); // one per pane — fresh random token
+const pty = spawn(process.env.SHELL!, [], {
+  env: { ...process.env, ...resume.env } as Record<string, string>, // sets OSC7577_TOKEN
+});
+pty.attach(resume); // ResumeTracker implements IPtyConsumer
+
+// Persist on every change (the spec asks hosts to save each change as it happens).
+resume.onChange((record) => {
+  if (record)
+    savePane(paneId, record); // { pid, argv, cwd?, time }
+  else deletePane(paneId);
+});
+
+// User deliberately closed the pane → forget it (don't do this on host quit).
+onPaneClosedByUser(() => resume.clear());
+```
+
+On the next start, restoring is up to you — for example, spawn the user's shell in `record.cwd` and run `record.argv` from it, with a **new** tracker (tokens must not be reused). The resumed program is expected to report again.
+
+**Program side** — `formatResumeReport()` builds the signed escape sequence (and throws if the command can't be reported):
+
+```ts
+import { formatResumeReport } from "zigpty/resume";
+
+const token = process.env.OSC7577_TOKEN;
+if (token) {
+  process.stdout.write(
+    formatResumeReport({ pid: process.pid, argv: ["myagent", "--resume", sessionId] }, token),
+  );
+  // …later, when the user quits on purpose:
+  process.stdout.write(formatResumeReport({ pid: process.pid, clear: true }, token));
+}
+```
+
+**What zigpty does vs. what your app does:**
+
+| zigpty (`ResumeTracker`)                                                                  | Your app                                                                      |
+| ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Generates the per-pane token (CSPRNG) and gives you `env`                                 | Passes `resume.env` to the pane's first process only; one tracker per pane    |
+| Parses OSC 7577 from the stream (chunk-safe, `ESC \` and `BEL`)                           | Persists records (`onChange`) somewhere only the user can read                |
+| Verifies `mac` (constant-time), `time` window (default 60s) and per-pid monotonic `time`  | Decides **whether** to restore (opt-in, allow-lists, confirmation, …)         |
+| Strict grammar; _ignored_ vs _rejected_ semantics (rejected removes the owner's record)   | Actually restores: shell environment, `cwd`, run `argv` without shell-quoting |
+| Optional owner check: `pid` must be the PTY's process or a descendant (via `pty.stats()`) | Calls `clear()` when the user deliberately closes the pane                    |
+
+Not handled (by design or for now): no persistence, no restore/exec, no shell integration, no automatic clearing when the owner process exits and no pid start-time tracking — the spec's _SHOULD_ for exit-based clearing is left to the host, since a PTY exiting during host shutdown is exactly when the record is needed. If your host runs as root, the spec says not to accept reports without explicit user opt-in — only create a tracker when the user has opted in. If you spawn panes **without** a tracker, consider removing any inherited `OSC7577_TOKEN` from the child env (a terminal must not pass its own token on).
+
+**API:**
+
+```ts
+class ResumeTracker implements IPtyConsumer {
+  constructor(options?: {
+    token?: string; // default: createResumeToken()
+    window?: number; // seconds, default 60
+    now?: () => number; // Unix seconds — for tests
+    validatePid?: boolean; // default true (only when attached and pty.stats() works)
+  });
+  readonly token: string;
+  readonly env: { OSC7577_TOKEN: string };
+  readonly record: ResumeRecord | undefined; // PTY leader's record if any, else most recent
+  readonly records: ResumeRecord[]; // every owner, oldest first
+  onChange(listener: (record, records) => void): () => void;
+  feed(data: string | Buffer | Uint8Array): void;
+  clear(): void; // drop all records; always notifies
+  dispose(): void;
+}
+
+interface ResumeRecord {
+  pid: number;
+  argv: string[];
+  cwd?: string;
+  time: number;
+}
+
+verifyResumeReport(report: ResumeReport | string, token, { now?, window?, lastTime? })
+  // → { status: "accepted", report } | { status: "ignored", reason } | { status: "rejected", reason, pid? }
+formatResumeReport({ pid, argv?, cwd?, clear?, time? }, token): string
+createResumeToken(): string // 32 chars of [A-Za-z0-9_-]
+```
+
+`decodeOSC` from `zigpty/osc` also decodes OSC 7577 into `{ kind: "resume", valid, … }` — `signed` is the exact text the `mac` covers, and invalid reports keep whatever `mac`/`pid`/`time` could be parsed. The decoder has no token: always run `verifyResumeReport` before trusting one.
 
 ### `hasNative`
 

@@ -604,6 +604,128 @@ describe("decodeOSC", () => {
   });
 });
 
+describe("decodeOSC — OSC 7577 resume", () => {
+  const MAC = "a".repeat(64);
+  const dec = (body: string) => decodeOSC({ code: 7577, payload: body });
+
+  it("decodes the spec's Neovim argv report", () => {
+    const payload =
+      "pid=74877:time=1795543200:argv=bnZpbQ==,LVM=,L2hvbWUvdXNlci8ubG9jYWwvc3RhdGUvbnZpbS9zZXNzaW9ucy84ZjJjMWQudmlt:mac=9dbb99bfb856749a87563839d7ce9062818d78cf25909db93f309e0cd3b1909b";
+    expect(dec(payload)).toEqual({
+      kind: "resume",
+      valid: true,
+      pid: 74877,
+      time: 1795543200,
+      argv: ["nvim", "-S", "/home/user/.local/state/nvim/sessions/8f2c1d.vim"],
+      clear: false,
+      mac: "9dbb99bfb856749a87563839d7ce9062818d78cf25909db93f309e0cd3b1909b",
+      signed:
+        "pid=74877:time=1795543200:argv=bnZpbQ==,LVM=,L2hvbWUvdXNlci8ubG9jYWwvc3RhdGUvbnZpbS9zZXNzaW9ucy84ZjJjMWQudmlt",
+      raw: payload,
+    });
+  });
+
+  it("decodes clear and cwd reports", () => {
+    expect(dec(`pid=74877:time=1795543200:clear=1:mac=${MAC}`)).toMatchObject({
+      kind: "resume",
+      valid: true,
+      clear: true,
+      signed: "pid=74877:time=1795543200:clear=1",
+    });
+    const d = dec(
+      `pid=74877:time=1795543200:argv=bGF6eWdpdA==:cwd=L2hvbWUvdXNlci9zcmMvcHJvamVjdA==:mac=${MAC}`,
+    );
+    expect(d).toMatchObject({ valid: true, argv: ["lazygit"], cwd: "/home/user/src/project" });
+    expect(d).not.toHaveProperty("argv.1");
+  });
+
+  it("accepts unpadded base64, empty non-first elements, and unknown keys", () => {
+    // "nvim" unpadded, then an empty argument; `future` is ignored.
+    expect(dec(`pid=1:time=2:argv=bnZpbQ,:future=x.y:mac=${MAC}`)).toMatchObject({
+      valid: true,
+      argv: ["nvim", ""],
+    });
+    expect(dec(`pid=1:time=2:argv=bnZpbQ==:need=cwd,argv:mac=${MAC}`)).toMatchObject({
+      valid: true,
+      need: ["cwd", "argv"],
+    });
+  });
+
+  it("flags reports without a trailing mac as invalid with no mac", () => {
+    for (const body of [
+      "pid=1:time=2:argv=bnZpbQ==",
+      `mac=${MAC}:pid=1:time=2:argv=bnZpbQ==`,
+      `pid=1:time=2:argv=bnZpbQ==:mac=${MAC.toUpperCase()}`,
+      `pid=1:time=2:argv=bnZpbQ==:mac=${MAC}x`,
+      "?",
+    ]) {
+      const d = dec(body);
+      expect(d).toMatchObject({ kind: "resume", valid: false });
+      expect(d).not.toHaveProperty("mac");
+    }
+  });
+
+  it("flags grammar errors but still surfaces mac / pid / time", () => {
+    const cases: [string, string][] = [
+      ["pid=1:time=2:argv=bnZpbQ==:argv=bnZpbQ==", "repeated key"],
+      ["pid=1:time=2:argv=bnZpbQ==:Bad=1", "malformed pair"],
+      ["pid=1:time=2:argv=bnZpbQ==:x", "malformed pair"],
+      ["pid=1:time=2:argv=bnZpbQ==:x=a;b", "malformed pair"],
+      ["pid=1:time=2:argv=bnZpbQ=", "invalid `argv` element"], // wrong padding
+      ["pid=1:time=2:argv=bnZpb", "invalid `argv` element"], // impossible length
+      ["pid=1:time=2:argv=bnZp=", "invalid `argv` element"], // padding on full quantum
+      ["pid=1:time=2:argv=_w==", "invalid `argv` element"], // base64url alphabet
+      ["pid=1:time=2:argv=/w==", "invalid `argv` element"], // 0xff: not UTF-8
+      ["pid=1:time=2:argv=bnZpbQ==,YQpi", "invalid `argv` element"], // "a\nb"
+      ["pid=1:time=2:argv=bnZpbQ==,wp8=", "invalid `argv` element"], // U+009F (C1)
+      ["pid=1:time=2:argv=", "empty program name"],
+      ["pid=1:time=2:argv=,bnZpbQ==", "empty program name"],
+      ["pid=1:time=2:argv=Li9ydW4uc2g=", "relative path"], // ./run.sh
+      ["pid=1:time=2:argv=YmluL3J1bg==", "relative path"], // bin/run
+      ["pid=1:time=2:argv=LXJt", "starts with `-`"], // -rm
+      ["pid=1:time=2:argv=bnZpbQ==:clear=1", "both `argv` and `clear`"],
+      ["pid=1:time=2", "neither `argv` nor `clear`"],
+      ["pid=1:time=2:clear=0", "invalid `clear`"],
+      ["pid=1:time=2:argv=bnZpbQ==:cwd=cHJvamVjdA==", "not an absolute path"],
+      ["pid=1:time=2:argv=bnZpbQ==:cwd=", "not an absolute path"],
+      ["pid=1:time=2:argv=bnZpbQ==:need=later", "unsupported key in `need`"],
+      ["pid=1:time=2:argv=bnZpbQ==:need=", "invalid `need`"],
+      [`pid=1:time=2:mac=${MAC}:argv=bnZpbQ==`, "not the last key"],
+    ];
+    for (const [body, error] of cases) {
+      const d = dec(`${body}:mac=${MAC}`);
+      expect(d, body).toMatchObject({ kind: "resume", valid: false, mac: MAC, signed: body });
+      expect(d.kind === "resume" && !d.valid && d.error, body).toContain(error);
+      expect(d, body).toMatchObject({ pid: 1, time: 2 });
+    }
+  });
+
+  it("leaves pid / time unset when they are missing, malformed, repeated, or too large", () => {
+    const d1 = dec(`pid=0:time=02:argv=bnZpbQ==:mac=${MAC}`);
+    expect(d1).toMatchObject({ valid: false, error: "invalid `pid`" });
+    expect(d1).not.toHaveProperty("pid");
+    expect(d1).not.toHaveProperty("time");
+
+    const d2 = dec(`pid=1:pid=1:time=5:time=6:argv=bnZpbQ==:mac=${MAC}`);
+    expect(d2).not.toHaveProperty("pid");
+    expect(d2).not.toHaveProperty("time");
+
+    const d3 = dec(`pid=99999999999999999999:argv=bnZpbQ==:mac=${MAC}`);
+    expect(d3).toMatchObject({ valid: false, error: "invalid `pid`" });
+    expect(d3).not.toHaveProperty("pid");
+  });
+
+  it("does not touch OSCInspector.state", () => {
+    const i = new OSCInspector();
+    const events: OSCEvent[] = [];
+    i.on((e) => events.push(e));
+    i.feed(`\x1b]7577;pid=1:time=2:clear=1:mac=${MAC}\x1b\\`);
+    expect(events).toEqual([{ code: 7577, payload: `pid=1:time=2:clear=1:mac=${MAC}` }]);
+    expect(i.state).toEqual({});
+    i.dispose();
+  });
+});
+
 describe("createOSCDecoder", () => {
   it("falls back to built-ins when no customs provided", () => {
     const decode = createOSCDecoder();
@@ -667,7 +789,7 @@ describe("builtinOSCDecoders", () => {
     const codes = Object.keys(builtinOSCDecoders)
       .map(Number)
       .sort((a, b) => a - b);
-    expect(codes).toEqual([0, 1, 2, 7, 8, 9, 52, 99, 133, 633, 777, 1337]);
+    expect(codes).toEqual([0, 1, 2, 7, 8, 9, 52, 99, 133, 633, 777, 1337, 7577]);
   });
 
   it("individual decoders are callable for reuse", () => {

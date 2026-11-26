@@ -2,9 +2,12 @@ import { Buffer } from "node:buffer";
 import type {
   CustomDecodedOSC,
   DecodedOSC,
+  InvalidResumeReport,
   OSCDecoderFn,
   OSCDecoderMap,
   OSCEvent,
+  ResumeReport,
+  ValidResumeReport,
 } from "./types.ts";
 
 // --- Shared helpers ---
@@ -349,6 +352,192 @@ const clipboardDecoder: OSCDecoderFn<DecodedOSC> = (payload) => {
   return { kind: "clipboard", selection, selections, data: value };
 };
 
+// --- OSC 7577: Program Resume Protocol (experimental, spec rev 0.5) ---
+// https://www.superlogical.com/rex/docs/build/program-resume
+//
+//   body := pair (":" pair)* ":mac=" hex
+//   pair := key "=" value ; key := [a-z]+ ; value := [A-Za-z0-9_.,+/=-]*
+//
+// Stateless: no token, no mac check, no clock. Strict about everything else.
+
+/** Keys this implementation understands (anything else in `need` is rejected). */
+export const RESUME_KEYS: ReadonlySet<string> = new Set([
+  "pid",
+  "time",
+  "argv",
+  "cwd",
+  "clear",
+  "need",
+  "mac",
+]);
+
+const RESUME_MAC_RE = /:mac=([0-9a-f]{64})$/;
+const RESUME_PAIR_RE = /^([a-z]+)=([A-Za-z0-9_.,+/=-]*)$/;
+const RESUME_UINT_RE = /^[1-9][0-9]*$/;
+const RESUME_KEY_RE = /^[a-z]+$/;
+const B64_BODY_RE = /^[A-Za-z0-9+/]*$/;
+// C0, DEL and C1 controls (U+0000–U+001F, U+007F–U+009F).
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional.
+const RESUME_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
+const utf8Strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+// Standard base64 of UTF-8 text without control characters. Padding is
+// optional, but when present it must be the correct amount.
+function decodeResumeText(s: string): string | undefined {
+  let body = s;
+  const pad = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
+  if (pad > 0) {
+    if (s.length % 4 !== 0) return undefined;
+    body = s.slice(0, -pad);
+  } else if (s.length % 4 === 1) {
+    return undefined;
+  }
+  if (!B64_BODY_RE.test(body)) return undefined;
+  let text: string;
+  try {
+    text = utf8Strict.decode(Buffer.from(body, "base64"));
+  } catch {
+    return undefined;
+  }
+  if (RESUME_CONTROL_RE.test(text)) return undefined;
+  return text;
+}
+
+function isAbsolutePath(p: string): boolean {
+  // POSIX absolute, plus Windows drive-absolute (`C:\`, `C:/`) and UNC (`\\host`).
+  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+
+function parseResumeUint(v: string | undefined): number | undefined {
+  if (v === undefined || !RESUME_UINT_RE.test(v)) return undefined;
+  const n = Number(v);
+  return Number.isSafeInteger(n) ? n : undefined;
+}
+
+/**
+ * Decode an OSC 7577 body (the payload after `7577;`) into a
+ * {@link ResumeReport}. Never throws. Does not verify the `mac`.
+ */
+export function decodeResumeReport(payload: string): ResumeReport {
+  const raw = payload;
+  if (payload === "?") return { kind: "resume", valid: false, error: "reserved body `?`", raw };
+
+  const m = RESUME_MAC_RE.exec(payload);
+  if (!m) {
+    return { kind: "resume", valid: false, error: "report does not end with `:mac=<hex>`", raw };
+  }
+  const mac = m[1]!;
+  const signed = payload.slice(0, m.index);
+
+  let error: string | undefined;
+  const fail = (msg: string) => {
+    error ??= msg;
+  };
+
+  const fields = new Map<string, string>();
+  const repeated = new Set<string>();
+  for (const part of signed.split(":")) {
+    const pm = RESUME_PAIR_RE.exec(part);
+    if (!pm) {
+      fail("malformed pair");
+      continue;
+    }
+    const key = pm[1]!;
+    if (fields.has(key)) {
+      repeated.add(key);
+      fail(`repeated key \`${key}\``);
+      continue;
+    }
+    fields.set(key, pm[2]!);
+  }
+
+  // pid / time are surfaced even when something else is wrong, so a verifier
+  // can run the time check and know whose records to drop on rejection.
+  const pid = repeated.has("pid") ? undefined : parseResumeUint(fields.get("pid"));
+  const time = repeated.has("time") ? undefined : parseResumeUint(fields.get("time"));
+  if (!fields.has("pid")) fail("missing `pid`");
+  else if (pid === undefined) fail("invalid `pid`");
+  if (!fields.has("time")) fail("missing `time`");
+  else if (time === undefined) fail("invalid `time`");
+  if (fields.has("mac")) fail("`mac` is not the last key");
+
+  const argvRaw = fields.get("argv");
+  const clearRaw = fields.get("clear");
+  let argv: string[] | undefined;
+  let clear = false;
+  if (argvRaw !== undefined && clearRaw !== undefined) {
+    fail("report has both `argv` and `clear`");
+  } else if (argvRaw === undefined && clearRaw === undefined) {
+    fail("report has neither `argv` nor `clear`");
+  } else if (clearRaw !== undefined) {
+    if (clearRaw === "1") clear = true;
+    else fail("invalid `clear` value");
+  } else {
+    argv = [];
+    for (const el of argvRaw!.split(",")) {
+      const text = decodeResumeText(el);
+      if (text === undefined) {
+        fail("invalid `argv` element");
+        break;
+      }
+      argv.push(text);
+    }
+    const prog = argv[0];
+    if (prog !== undefined && error === undefined) {
+      if (prog === "") fail("empty program name");
+      else if (isAbsolutePath(prog)) {
+        // ok
+      } else if (/[\\/]/.test(prog) || prog === "." || prog === "..") {
+        fail("program is a relative path");
+      } else if (prog.startsWith("-")) {
+        fail("program name starts with `-`");
+      }
+    }
+  }
+
+  let cwd: string | undefined;
+  const cwdRaw = fields.get("cwd");
+  if (cwdRaw !== undefined) {
+    cwd = decodeResumeText(cwdRaw);
+    if (cwd === undefined) fail("invalid `cwd`");
+    else if (!isAbsolutePath(cwd)) fail("`cwd` is not an absolute path");
+  }
+
+  let need: string[] | undefined;
+  const needRaw = fields.get("need");
+  if (needRaw !== undefined) {
+    need = needRaw.split(",");
+    for (const k of need) {
+      if (!RESUME_KEY_RE.test(k)) fail("invalid `need` value");
+      else if (!RESUME_KEYS.has(k)) fail(`unsupported key in \`need\`: ${k}`);
+    }
+  }
+
+  if (error !== undefined) {
+    const out: InvalidResumeReport = { kind: "resume", valid: false, error, mac, signed, raw };
+    if (pid !== undefined) out.pid = pid;
+    if (time !== undefined) out.time = time;
+    return out;
+  }
+
+  const out: ValidResumeReport = {
+    kind: "resume",
+    valid: true,
+    pid: pid!,
+    time: time!,
+    clear,
+    mac,
+    signed,
+    raw,
+  };
+  if (argv) out.argv = argv;
+  if (cwd !== undefined) out.cwd = cwd;
+  if (need) out.need = need;
+  return out;
+}
+
+const resumeDecoder: OSCDecoderFn<DecodedOSC> = (payload) => decodeResumeReport(payload);
+
 /**
  * Built-in OSC decoders keyed by code. Exposed so callers can inspect,
  * reuse, or layer their own decoders on top via {@link createOSCDecoder}.
@@ -369,6 +558,7 @@ export const builtinOSCDecoders: OSCDecoderMap<DecodedOSC> = {
   633: shellIntegrationDecoder("vscode"),
   777: osc777Decoder,
   1337: osc1337Decoder,
+  7577: resumeDecoder,
 };
 
 /**

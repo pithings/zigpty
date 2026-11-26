@@ -5,7 +5,12 @@ export default defineBuildConfig({
   entries: [
     {
       type: "bundle",
-      input: ["./src/index.ts", "./src/osc/index.ts", "./src/idle/index.ts"],
+      input: [
+        "./src/index.ts",
+        "./src/osc/index.ts",
+        "./src/idle/index.ts",
+        "./src/resume/index.ts",
+      ],
     },
   ],
   // hooks: {
