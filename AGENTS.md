@@ -42,6 +42,12 @@ zigpty/
 │   │   ├── unix.ts         # UnixPty: tty.ReadStream + async fs.write
 │   │   ├── windows.ts      # WindowsPty: native callbacks + deferred init
 │   │   └── pipe.ts         # PipePty: pure-TS fallback when native bindings unavailable
+│   ├── osc/                # `zigpty/osc` — OSCInspector (byte-fed parser + state) + decodeOSC
+│   ├── idle/               # `zigpty/idle` — IdleDetector (IPtyConsumer)
+│   ├── resume/             # `zigpty/resume` — OSC 7577 Program Resume (experimental)
+│   │   ├── tracker.ts      # ResumeTracker (IPtyConsumer): token, verify, records per owner pid
+│   │   ├── protocol.ts     # verifyResumeReport, formatResumeReport, createResumeToken
+│   │   └── types.ts        # ResumeRecord, ResumeVerdict, options
 │   ├── spawn.test.ts       # E2E tests (platform-conditional)
 │   ├── pipe.test.ts        # PipePty fallback tests
 │   └── terminal.test.ts    # Terminal class tests
@@ -87,6 +93,12 @@ Terminal (standalone, src/terminal.ts) — Bun-compatible callbacks, AsyncDispos
 - `SIGWINCH` sent on `resize()` as best-effort hint
 - Foreground process tracking via `/proc/<pid>/stat` → `/proc/<pgrp>/cmdline` (Linux only)
 - Merges stdout + stderr into single data stream (matching real PTY behavior)
+
+**Program resume** (`src/resume/`, experimental, [OSC 7577 spec rev 0.5](https://www.superlogical.com/rex/docs/build/program-resume)): two layers, mirroring `osc/`.
+
+- `src/osc/decode.ts` registers a **stateless** 7577 decoder (`kind: "resume"`). No token, no mac check, no clock — just the strict grammar. Invalid reports still decode as `kind: "resume", valid: false` and keep any parseable `mac`/`signed`/`pid`/`time` so the verifier can distinguish _ignored_ from _rejected_.
+- `verifyResumeReport()` (pure) applies the spec order: `mac` (SHA-256 of `signed + ":" + token`, constant-time compare) → `time` window + not older than `lastTime` → grammar. mac/time failure = `ignored` (no state change); later failure = `rejected` (caller removes the owner pid's records).
+- `ResumeTracker` wraps an internal `OSCInspector` (its 4096-byte payload cap exceeds the spec's 2048-byte minimum; longer reports overflow and are ignored, as the spec requires). Records keyed by owner pid, Map insertion order = recency; last accepted `time` per pid is kept separately (survives record removal) for replay protection. Optional owner check via `pty.stats()` (leader or descendant). Records are **kept** on detach/PTY exit — host shutdown is when they're needed. No persistence, restore, or exit-based clearing — host app's job.
 
 **Native loading** (`napi.ts`): `loadNative()` returns `null` on failure instead of throwing. `hasNative` boolean exported for runtime detection. `spawn()` in `index.ts` routes to `PipePty` when `hasNative === false`.
 

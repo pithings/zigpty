@@ -10,10 +10,13 @@ export { builtinOSCDecoders, createOSCDecoder, decodeOSC } from "./decode.ts";
 export type {
   CustomDecodedOSC,
   DecodedOSC,
+  InvalidResumeReport,
   OSCDecoderFn,
   OSCDecoderMap,
   OSCEvent,
   OSCListener,
   OSCState,
   OSCStateListener,
+  ResumeReport,
+  ValidResumeReport,
 } from "./types.ts";

@@ -13,7 +13,8 @@
   "exports": {
     ".": "./dist/index.mjs",
     "./osc": "./dist/osc/index.mjs",
-    "./idle": "./dist/idle/index.mjs"
+    "./idle": "./dist/idle/index.mjs",
+    "./resume": "./dist/resume/index.mjs"
   },
   "scripts": {
     "build": "zig build --release && obuild",

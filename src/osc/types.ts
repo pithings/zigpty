@@ -121,7 +121,69 @@ export type DecodedOSC =
       version: string;
       raw: string;
     }
+  | ResumeReport
   | { kind: "unknown"; code: number; payload: string };
+
+/**
+ * A well-formed OSC 7577 (Program Resume Protocol) report.
+ *
+ * Decoding is stateless and has no token: `valid: true` means the body
+ * passed the strict grammar, not that it is authentic. Check `mac` against
+ * the pane's token (`verifyResumeReport` from `zigpty/resume`) before trusting it.
+ *
+ * @experimental Spec rev 0.5 — https://www.superlogical.com/rex/docs/build/program-resume
+ */
+export interface ValidResumeReport {
+  kind: "resume";
+  valid: true;
+  /** Owning process id. */
+  pid: number;
+  /** Report time, seconds since the Unix epoch. */
+  time: number;
+  /** Base64-decoded resume command. Present unless `clear` is true. */
+  argv?: string[];
+  /** Base64-decoded absolute working directory. */
+  cwd?: string;
+  /** `clear=1` — remove the owner's record. */
+  clear: boolean;
+  /** Keys the sender requires the terminal to implement. */
+  need?: string[];
+  /** 64 lowercase hex chars: SHA-256 of `signed + ":" + token`. */
+  mac: string;
+  /** Exact body text the `mac` covers (everything before the final `:mac=`). */
+  signed: string;
+  /** Raw payload after `7577;`. */
+  raw: string;
+}
+
+/**
+ * An OSC 7577 report that failed the strict grammar. `mac` / `signed` /
+ * `pid` / `time` are filled in when they could still be parsed, so a
+ * verifier can tell an *ignored* report (no verifiable `mac` or `time`)
+ * from a *rejected* one (authentic but malformed — the owner's records
+ * must be removed).
+ *
+ * @experimental Spec rev 0.5 — https://www.superlogical.com/rex/docs/build/program-resume
+ */
+export interface InvalidResumeReport {
+  kind: "resume";
+  valid: false;
+  /** Why the report is invalid (first problem found). */
+  error: string;
+  /** Present when the body ends with a well-formed `:mac=<64 hex>`. */
+  mac?: string;
+  /** Present together with `mac`. */
+  signed?: string;
+  /** Present when there is exactly one usable `pid` pair. */
+  pid?: number;
+  /** Present when there is exactly one usable `time` pair. */
+  time?: number;
+  /** Raw payload after `7577;`. */
+  raw: string;
+}
+
+/** Decoded OSC 7577 report — narrow on `valid`. */
+export type ResumeReport = ValidResumeReport | InvalidResumeReport;
 
 /** Listener for raw OSC events. */
 export type OSCListener = (event: OSCEvent) => void;
